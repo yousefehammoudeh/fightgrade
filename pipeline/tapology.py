@@ -65,9 +65,12 @@ FATAL_QA = {"parse_failed", "bout_not_two_fighters"}
 BACKOFF = (15, 45)          # seconds, for a soft failure (503, unavailable page)
 # Pacing. The archive's "1.0 s floor" was measured in August with VPN rotation
 # spreading load across IPs. On 2026-10-26, from one IP, ~13 requests at ~1.3 s
-# drew a Cloudflare challenge; at 3 s the same pages fetched clean. 2.5 s keeps a
-# peak Saturday (~270 pages) near 12 minutes.
-DEFAULT_SLEEP = 2.5
+# drew a Cloudflare challenge; at 3 s the same pages fetched clean. From Dagster+
+# Serverless (AWS us-west-2 IPs), 2.5 s drew a challenge every ~25 requests across
+# three runs, and 4 s drew none in 100 on an IP that had just been challenged
+# twice. 4 s fits ~420 requests in MAX_FETCH_MINUTES, and a peak Saturday
+# (~270 pages) in ~20 minutes.
+DEFAULT_SLEEP = 4.0
 RECLEAR_WAIT = 60           # seconds of quiet before re-loading a challenged page
 MAX_RECLEARS = 2            # per run; past that, stop rather than push
 # The IP budget. The VPN crawl measured ~530 events per IP at 1.0 s before
