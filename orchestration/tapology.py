@@ -10,6 +10,9 @@ is loaded:
 It writes to the environment's zone (pipeline/lake.py): DEV by default, PROD
 only on the Dagster+ production deployment or with FIGHTGRADE_ENV=prod.
 
+Each run spends at most pipeline.tapology.DAILY_BUDGET requests a day from its
+IP. What it cannot reach is queued in the lake and fetched by the next run.
+
 Tapology needs headed Chrome. On the Mac it uses the real display; on Dagster+
 Serverless the image (Dockerfile) carries Chrome and Xvfb, and the crawler
 starts a virtual display for itself. `from_run` re-processes a run's local
@@ -28,8 +31,8 @@ from .main_checkout import IN_DAGSTER_PLUS, dbt_project_for
 
 
 class TapologyCrawlConfig(Config):
-    limit: int = 10                         # completed events (or bout pages) to keep
-    max_pages: int = 3                      # results pages to scan for new events
+    limit: int = 0                          # completed events (or bout pages) to keep; 0 = no cap
+    max_requests: int = tap.DAILY_BUDGET    # requests this run may spend, within today's budget for the IP
     sleep: float = tap.DEFAULT_SLEEP        # seconds between requests; 2.0 is the floor
     from_run: str = ""                      # re-process an archived run: no requests to Tapology
     title_bouts_since: str = ""             # YYYY-MM-DD: fetch missing title-bout pages instead
@@ -58,19 +61,25 @@ def tapology_fetch(context: OpExecutionContext, config: TapologyCrawlConfig) -> 
     run_dir = tap.RUNS / run_id
     context.log.info(f"run {run_id}, env {env}, zone '{zone(env)}'")
     with crawler_log_to(context):
-        known = tap.known_events(Lake(env), env)
+        lake = Lake(env)
+        known = tap.known_events(lake, env)
         context.log.info(f"{len(known):,} events already archived")
         if config.from_run:
             result = tap.rebuild(run_dir, env)
             known -= {e["event_slug"] for e in result["rows"]["event_details"]}
-        elif config.title_bouts_since:
-            result = tap.backfill_title_bouts(config.title_bouts_since, config.limit, config.sleep, env, run_dir)
         else:
-            result = tap.crawl(config.limit, config.sleep, config.max_pages, env, run_dir, known)
+            with tap.ip_budget(lake, config.max_requests) as budget:
+                if config.title_bouts_since:
+                    result = tap.backfill_title_bouts(config.title_bouts_since, config.limit, config.sleep,
+                                                      budget, env, run_dir)
+                else:
+                    result = tap.daily_crawl(lake, env, run_dir, config.limit, config.sleep, budget, known)
     if result["stopped"]:
         context.log.warning(result["stopped"])
     context.add_output_metadata({"run_id": run_id, "env": env, **result["report"],
                                  **{f"rows_{t}": len(r) for t, r in result["rows"].items()}})
+    if result.get("state"):
+        context.log.info(f"{len(result['state']['queue'])} events queued for the next run")
     return {"env": env, "run_id": run_id, "run_dir": str(run_dir), "result": result, "known": known}
 
 
@@ -88,6 +97,7 @@ def stage_parquet(context: OpExecutionContext, fetched: dict) -> dict:
 def upload_to_lake(context: OpExecutionContext, bundle: dict) -> dict:
     lake = Lake(bundle["env"])
     pages, files = tap.upload(lake, bundle["result"], bundle["staged"], Path(bundle["run_dir"]), bundle["env"])
+    tap.save_queue(lake, bundle["env"], bundle["result"])
     context.log.info(f"uploaded {pages} raw pages and {files} Parquet files to zone '{zone(bundle['env'])}'")
     context.add_output_metadata({"raw_pages": pages, "parquet_files": files})
     return bundle

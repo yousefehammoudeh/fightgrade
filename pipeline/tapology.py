@@ -1,6 +1,6 @@
 """Tapology crawl: newly completed events -> raw HTML and Parquet in the lake -> LANDING.
 
-    .venv/bin/python -m pipeline.tapology --limit 10              # DEV: crawl, upload, load, check
+    .venv/bin/python -m pipeline.tapology                         # DEV: crawl, upload, load, check
     .venv/bin/python -m pipeline.tapology --limit 10 --dry-run    # crawl and stage locally only
 
 The method is the archive's, unchanged (docs/scraping-method.md): headed real
@@ -10,17 +10,21 @@ that scrapers/driver/reparse.py uses, so a new partition has exactly the shape
 of the 820k rows already in LANDING.
 
 Only COMPLETED events are kept. Discovery is /fightcenter?schedule=results,
-newest first, minus every event already archived in the lake. Title bouts on
-those cards also get their bout page, which is what bout_details is built from.
+newest first, read back to the first page with nothing new on it, minus every
+event already archived or queued. Title bouts on those cards also get their
+bout page, which is what bout_details is built from.
 
-Polite by construction: one browser, one page at a time, no retry loops. A
-Cloudflare challenge mid-run gets a minute of quiet and one ordinary page load,
-at most twice; after that the crawl stops instead of hammering — a block that
-is kept warm never clears (HANDOFF.stage2.md §3).
+Polite by construction: one browser, one page at a time, no retry loops, and
+at most DAILY_BUDGET requests a day from one IP. Work the budget cannot reach
+is queued in the lake for the next run, never dropped. A Cloudflare challenge
+mid-run gets a minute of quiet and one ordinary page load, at most twice; a 503
+or 429 ends the run at once. Either way the crawl stops instead of hammering — a
+block that is kept warm never clears (HANDOFF.stage2.md §3).
 """
 import argparse, gzip, importlib.util, json, os, re, select, shutil, subprocess, sys, tempfile, time
 from collections import Counter
-from datetime import date
+from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
@@ -63,6 +67,38 @@ BACKOFF = (15, 45)          # seconds, for a soft failure (503, unavailable page
 DEFAULT_SLEEP = 2.5
 RECLEAR_WAIT = 60           # seconds of quiet before re-loading a challenged page
 MAX_RECLEARS = 2            # per run; past that, stop rather than push
+# The IP budget. The VPN crawl measured ~530 events per IP at 1.0 s before
+# Tapology's first 503, and rotated proactively at 450 (HANDOFF.md §8). There is
+# no rotation here, so 450 is a daily cap per egress IP: every request counts,
+# discovery and retries included, whichever run or zone spent it. A peak Saturday
+# is ~268 pages. What a day cannot fetch waits in the queue for the next one.
+DAILY_BUDGET = 450
+MAX_FETCH_MINUTES = 30      # stop fetching by then, so LANDING loads before the 03:00 build
+RATE_LIMITED = (429, 503)   # per-IP: waiting does nothing (HANDOFF.md §8), so stop and defer
+MAX_TRIES = 7               # days an event may stay unfinished in the queue before it is dropped
+DISCOVERY_SHARE = 3         # discovery may spend at most 1/3 of a run's budget
+RESUME_OVERLAP = 6          # results pages a day's new events can push the listing down, and then some
+BOUT_LOOKBACK_DAYS = 30     # title bouts loaded this recently with no bout page are retried
+BUDGET_KEY = "state/tapology/ip_budget.json"     # zone-less: DEV and PROD runs share the IP
+
+
+def queue_key(env: str) -> str:
+    return f"{zone(env)}state/tapology/queue.json"
+
+
+class Budget:
+    """Requests left today on this IP, and the run's fetch deadline."""
+
+    def __init__(self, limit: int, minutes: float = MAX_FETCH_MINUTES):
+        self.limit, self.spent = limit, 0
+        self.deadline = time.time() + minutes * 60
+
+    def take(self) -> None:
+        if self.spent >= self.limit:
+            raise Stop(f"daily budget spent ({self.limit} requests)")
+        if time.time() > self.deadline:
+            raise Stop(f"fetch deadline reached ({MAX_FETCH_MINUTES} min)")
+        self.spent += 1
 
 
 def log(msg: str) -> None:
@@ -104,8 +140,9 @@ def virtual_display() -> subprocess.Popen | None:
 class Browser:
     """Headed Chrome holding Cloudflare's clearance for the whole run."""
 
-    def __init__(self, pw):
+    def __init__(self, pw, budget: Budget):
         self.pw, self.ctx, self.page, self.profile = pw, None, None, None
+        self.budget = budget
         self.reclears = 0
         self.display = None
 
@@ -120,6 +157,7 @@ class Browser:
             user_data_dir=self.profile, channel="chrome", headless=False, args=args, env=dict(os.environ),
             viewport={"width": 1280, "height": 900}, locale="en-US")
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        self.budget.take()
         self.page.goto(f"{BASE}/fightcenter", wait_until="domcontentloaded", timeout=60000)
         for _ in range(15):                      # a clear lands in 6-9 s
             if "Just a moment" not in self.page.title():
@@ -128,12 +166,14 @@ class Browser:
         return False
 
     def fetch(self, url: str, js: str) -> dict:
+        self.budget.take()
         return self.page.evaluate(js, url)
 
     def reclear(self, url: str) -> bool:
         """After a mid-run challenge: back off, then load the page once as a normal
         visitor would and let the browser clear it. Never interacts with it."""
         time.sleep(RECLEAR_WAIT)
+        self.budget.take()
         self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
         for _ in range(10):
             if "Just a moment" not in self.page.title():
@@ -153,13 +193,18 @@ class Browser:
                 os.environ.pop("DISPLAY", None)
 
 
-class Blocked(Exception):
+class Stop(Exception):
+    """End the run's fetching now; what is left waits in the queue for tomorrow."""
+
+
+class Blocked(Stop):
     """Cloudflare challenged us mid-run: stop, don't push."""
 
 
 def polite_fetch(br: Browser, url: str, js: str, sleep: float) -> tuple[str | None, str]:
     """(html, status). Soft failures get two backed-off retries, then give up. A
-    challenge gets one quiet re-clear (at most MAX_RECLEARS per run), then stops."""
+    challenge gets one quiet re-clear (at most MAX_RECLEARS per run), then stops;
+    a 503 or 429 is this IP's rate limit and stops at once."""
     for attempt in range(len(BACKOFF) + 1):
         res = br.fetch(url, js)
         time.sleep(sleep)
@@ -168,37 +213,71 @@ def polite_fetch(br: Browser, url: str, js: str, sleep: float) -> tuple[str | No
         status = res.get("status")
         if status == "CHALLENGE":
             if br.reclears >= MAX_RECLEARS:
-                raise Blocked(url)
+                raise Blocked(f"Cloudflare challenge at {url}")
             br.reclears += 1
             log(f"  challenge on {url.rsplit('/', 1)[-1][:50]} -> quiet {RECLEAR_WAIT}s, re-clear "
                 f"{br.reclears}/{MAX_RECLEARS}")
             if not br.reclear(url):
-                raise Blocked(url)
+                raise Blocked(f"Cloudflare challenge at {url}")
             continue
         if status in (404, 410, "REDIRECT"):
             return None, str(status)
+        if status in RATE_LIMITED:
+            raise Stop(f"rate limited ({status}) at {url}")
         if attempt < len(BACKOFF):
             log(f"  soft {status} on {url.rsplit('/', 1)[-1][:50]} -> wait {BACKOFF[attempt]}s")
             time.sleep(BACKOFF[attempt])
     return None, f"gave_up_{status}"
 
 
-def discover(br: Browser, known: set[str], want: int, max_pages: int, sleep: float) -> list[str]:
-    """Newest completed-event slugs we don't hold, from the results listing."""
+def discover(br: Browser, accounted: set[str], sleep: float, cap: int, resume_page: int | None
+             ) -> tuple[list[str], int | None, Stop | None]:
+    """Event slugs on the results listing (newest first) that are neither archived
+    nor queued, read back to the frontier: the first page with nothing new on it.
+
+    Returns them, the page to resume from tomorrow if `cap` pages (or the run's
+    budget) ran out before the frontier, and that Stop if it was the budget. The
+    listing shifts down as events are added, so the resumed scan starts two pages
+    early and walks over up to RESUME_OVERLAP already-seen pages before an empty
+    page counts as the frontier again; anything seen twice is de-duplicated."""
     found: list[str] = []
-    for n in range(1, max_pages + 1):
-        url = f"{BASE}/fightcenter?schedule=results" + (f"&page={n}" if n > 1 else "")
-        html, status = polite_fetch(br, url, c3.JS, sleep)
-        if html is None:
-            log(f"  results page {n}: {status}")
-            break
-        on_page = list(dict.fromkeys(EVENT_LINK.findall(html)))
-        new = [s for s in on_page if s not in known and s not in found]
-        log(f"  results page {n}: {len(on_page)} events, {len(new)} not yet archived")
-        found += new
-        if len(found) >= want:
-            break
-    return found
+    read, stopped = 0, None
+
+    def scan(first: int, overlap: int = 0) -> int | None:
+        nonlocal read, stopped
+        n, found_here, empty = first, 0, 0
+        while True:
+            if read >= cap:
+                return n
+            url = f"{BASE}/fightcenter?schedule=results" + (f"&page={n}" if n > 1 else "")
+            read += 1
+            try:
+                html, status = polite_fetch(br, url, c3.JS, sleep)
+            except Stop as e:
+                stopped = e
+                return n
+            if html is None:
+                log(f"  results page {n}: {status}")
+                return None if status in ("404", "410") else n      # past the end, or retry tomorrow
+            on_page = list(dict.fromkeys(EVENT_LINK.findall(html)))
+            if not on_page:
+                return None                                         # past the end of the listing
+            new = [s for s in on_page if s not in accounted and s not in found]
+            log(f"  results page {n}: {len(on_page)} events, {len(new)} not yet archived or queued")
+            found.extend(new)
+            found_here += len(new)
+            empty = 0 if new else empty + 1
+            if not new and (found_here or empty > overlap):
+                return None
+            n += 1
+
+    resume = scan(1)
+    if resume is not None:                  # cut short near the top: tomorrow rescans it from page 1,
+        return found, resume_page or resume, stopped    # so keep any deeper point still owed
+    if resume_page:
+        log(f"  resuming yesterday's unfinished discovery near page {resume_page}")
+        resume = scan(max(resume_page - 2, 2), overlap=RESUME_OVERLAP)
+    return found, resume, stopped
 
 
 def event_rows(ev: dict, slug: str, key: str, fetch_date: str) -> tuple[dict, list, list, list]:
@@ -221,8 +300,17 @@ def bout_row(bp: dict, b: dict, e_row: dict, key: str, fetch_date: str) -> tuple
     return d, c3b.qa(bp, idx)
 
 
-def crawl(limit: int, sleep: float, max_pages: int, env: str, run_dir: Path, known: set[str]) -> dict:
-    """Fetch, archive locally and parse. Returns what to stage and what happened."""
+def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, known: set[str],
+          state: dict, pending_bouts: list, discover_events: bool = True) -> dict:
+    """Fetch, archive locally and parse, until the work or the budget runs out.
+
+    Order: events new on the listing (newest first), then the queue earlier runs
+    could not finish, then title-bout pages, older runs' first. Whatever is left
+    goes back in the queue (`state`, saved to the lake once this run's pages are
+    uploaded), so a short day defers work and never drops it. An event that is
+    not finished yet (results not entered) is retried daily for MAX_TRIES days.
+    With discover_events=False only `pending_bouts` are fetched and the queue is
+    left as it is."""
     from playwright.sync_api import sync_playwright
 
     fetch_date = date.today().isoformat()
@@ -235,6 +323,22 @@ def crawl(limit: int, sleep: float, max_pages: int, env: str, run_dir: Path, kno
     anomalies: list[dict] = []
     stopped = None
 
+    queue = [q for q in state.get("queue", []) if q["slug"] not in known]
+    abandoned = set(state.get("abandoned", []))
+    resume = state.get("resume_page")
+    worklist: list[dict] = []
+    done: set[str] = set()                      # fetched this run, whatever the outcome
+    retry: list[dict] = []
+
+    def defer(item: dict, why: str) -> None:
+        tries = item.get("tries", 0) + 1
+        if tries >= MAX_TRIES:
+            abandoned.add(item["slug"])
+            report["events_dropped_after_retries"] += 1
+            log(f"  dropping {item['slug'][:60]} after {tries} tries ({why})")
+        else:
+            retry.append({"slug": item["slug"], "tries": tries})
+
     def archive(entity: str, slug: str, html: str) -> str:
         key = raw_html_key("tapology", entity, fetch_date, slug, env)
         local = raw_dir / entity / f"{slug}.html.gz"
@@ -245,33 +349,48 @@ def crawl(limit: int, sleep: float, max_pages: int, env: str, run_dir: Path, kno
         return key
 
     with sync_playwright() as pw:
-        br = Browser(pw)
+        br = Browser(pw, budget)
         try:
             if not br.open():
                 raise Blocked("Cloudflare did not clear on the first page")
             log("browser ready, Cloudflare cleared")
-            candidates = discover(br, known, limit * 2, max_pages, sleep)
+            if discover_events:
+                accounted = known | abandoned | {q["slug"] for q in queue}
+                new, resume, stop = discover(br, accounted, sleep, max(budget.limit // DISCOVERY_SHARE, 1), resume)
+                worklist = [{"slug": s, "tries": 0} for s in new] + queue
+                log(f"{len(new)} events new on the listing, {len(queue)} queued by earlier runs")
+                if stop:
+                    raise stop
 
-            title_bouts = []
-            for slug in candidates:
-                if report["events_kept"] >= limit:
+            title_bouts = list(pending_bouts)
+            for item in worklist:
+                if limit and report["events_kept"] >= limit:
                     break
+                slug = item["slug"]
                 url = f"{BASE}/fightcenter/events/{slug}"
                 html, status = polite_fetch(br, url, c3.JS, sleep)
+                done.add(slug)
                 if html is None:
                     report[f"event_miss_{status}"] += 1
+                    if status in ("404", "410", "REDIRECT"):
+                        abandoned.add(slug)                # gone from Tapology for good
+                    else:
+                        defer(item, status)
                     continue
                 if "primaryDetailsContainer" not in html and "sectionFightCard" not in html:
                     report["event_bad_page"] += 1
+                    defer(item, "bad_page")
                     continue
                 try:
                     ev = parse_event(html, url)
                 except Exception as ex:                    # a parser bug must not stop the crawl
                     report["event_parse_error"] += 1
                     anomalies.append({"slug": slug, "code": "parse_failed", "detail": f"{type(ex).__name__}: {ex}"})
+                    defer(item, "parse_failed")
                     continue
-                if ev.get("status") != "Completed":       # completed events only
+                if ev.get("status") != "Completed":       # completed events only; try again tomorrow
                     report[f"event_skipped_{ev.get('status')}"] += 1
+                    defer(item, str(ev.get("status")))
                     continue
                 key = archive("event", slug, html)
                 e_row, b_rows, l_rows, qa = event_rows(ev, slug, key, fetch_date)
@@ -280,11 +399,15 @@ def crawl(limit: int, sleep: float, max_pages: int, env: str, run_dir: Path, kno
                 rows["bouts"] += b_rows
                 rows["event_fighters"] += l_rows
                 report["events_kept"] += 1
-                log(f"  event {report['events_kept']:>2}/{limit} {slug[:60]} "
+                log(f"  event {report['events_kept']:>3} {slug[:60]} "
                     f"({len(b_rows)} bouts, {e_row.get('event_date_index')})")
                 title_bouts += [(b, e_row) for b in b_rows if b.get("title_bout") and b.get("bout_slug")]
 
+            seen_bouts = set()
             for b, e_row in title_bouts:
+                if b["bout_slug"] in seen_bouts:
+                    continue
+                seen_bouts.add(b["bout_slug"])
                 url = f"{BASE}/fightcenter/bouts/{b['bout_slug']}"
                 html, status = polite_fetch(br, url, c3b.JS, sleep)
                 if html is None:
@@ -298,14 +421,19 @@ def crawl(limit: int, sleep: float, max_pages: int, env: str, run_dir: Path, kno
                 anomalies += qa
                 rows["bout_details"].append(d)
                 report["bout_pages_kept"] += 1
-        except Blocked as e:
-            stopped = f"stopped: Cloudflare challenge at {e}"
+        except Stop as e:
+            stopped = f"stopped: {e}"
             log(stopped)
         finally:
             br.close()
 
-    return {"fetch_date": fetch_date, "rows": rows, "pages": pages,
-            "report": dict(report), "anomalies": anomalies, "stopped": stopped}
+    left = [{"slug": q["slug"], "tries": q.get("tries", 0)} for q in (worklist or queue) if q["slug"] not in done]
+    queue_next = left + retry
+    report.update(requests=budget.spent, queued_for_next_run=len(queue_next))
+    log(f"{budget.spent} requests spent; {len(queue_next)} events queued for the next run")
+    state_next = {"queue": queue_next, "abandoned": sorted(abandoned), "resume_page": resume}
+    return {"fetch_date": fetch_date, "rows": rows, "pages": pages, "report": dict(report), "anomalies": anomalies,
+            "stopped": stopped, "state": state_next if discover_events else None}
 
 
 def rebuild(run_dir: Path, env: str) -> dict:
@@ -431,10 +559,65 @@ def verify(result: dict, staged: dict, run_dir: Path, env: str, lake: Lake | Non
 
 
 def known_events(lake: Lake, env: str) -> set[str]:
-    """Events already archived. DEV also skips its own earlier test crawls; PROD
-    ignores DEV's, which are tests and never reach PROD."""
+    """Events already archived, finished. DEV also skips its own earlier test
+    crawls; PROD ignores DEV's, which are tests and never reach PROD."""
     zones = ("",) if env == "prod" else ("", "dev/")
-    return lake.archived_slugs("tapology", "event", zones)
+    return lake.archived_slugs("tapology", "event", zones) - unfinished_events(env)
+
+
+def unfinished_events(env: str) -> set[str]:
+    """Events archived before they finished: the bulk crawl saved ~120 past events
+    as 'Upcoming' or 'In Progress', so their results were never fetched. Only PROD
+    LANDING holds the bulk load (DEV reads it too); crawls keep completed events only."""
+    cur = snowflake_cursor(env)
+    cur.execute("""select payload:event_slug::string from FIGHTGRADE_PROD.LANDING.LND_TAPOLOGY_EVENT_DETAILS
+                   qualify row_number() over (partition by payload:event_slug order by _loaded_at desc) = 1
+                     and payload:status::string <> 'Completed'""")
+    return {r[0] for r in cur.fetchall()}
+
+
+def egress_ip() -> str:
+    """The address Tapology sees, which the daily budget is kept against."""
+    import urllib.request
+    try:
+        return urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode().strip()
+    except OSError:
+        return "unknown"
+
+
+@contextmanager
+def ip_budget(lake: Lake, max_requests: int):
+    """Today's remaining requests on this egress IP, recorded in the lake after the
+    run whether it finished or not: a request spent is spent."""
+    ip, today = egress_ip(), date.today().isoformat()
+    spent = lake.read_json(BUDGET_KEY, {}).get(ip, {}).get(today, 0)
+    budget = Budget(max(min(max_requests, DAILY_BUDGET - spent), 0))
+    log(f"egress IP {ip}: {spent}/{DAILY_BUDGET} requests spent today, this run may spend {budget.limit}")
+    try:
+        yield budget
+    finally:
+        ledger = lake.read_json(BUDGET_KEY, {})
+        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        days = {d: n for d, n in ledger.get(ip, {}).items() if d > week_ago}
+        days[today] = days.get(today, 0) + budget.spent
+        ledger[ip] = days
+        lake.write_json(BUDGET_KEY, ledger)
+
+
+def daily_crawl(lake: Lake, env: str, run_dir: Path, limit: int, sleep: float, budget: Budget,
+                known: set[str]) -> dict:
+    """The scheduled run: today's events plus whatever earlier runs deferred."""
+    state = lake.read_json(queue_key(env), {})
+    since = (date.today() - timedelta(days=BOUT_LOOKBACK_DAYS)).isoformat()
+    bouts = pending_title_bouts(env, since)
+    log(f"{len(state.get('queue', []))} events and {len(bouts)} title-bout pages deferred by earlier runs")
+    return crawl(limit, sleep, budget, env, run_dir, known, state, bouts)
+
+
+def save_queue(lake: Lake, env: str, result: dict) -> None:
+    """After the run's pages are in the lake, so nothing leaves the queue unarchived."""
+    if result.get("state") is not None:
+        lake.write_json(queue_key(env), result["state"])
 
 
 def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
@@ -492,53 +675,23 @@ order by 2 desc
 """
 
 
-def backfill_title_bouts(since: str, limit: int, sleep: float, env: str, run_dir: Path) -> dict:
-    """Title bouts LANDING holds (from a crawl since `since`) whose bout page we never
-    fetched — e.g. a crawl stopped by a challenge — fetched now."""
-    from playwright.sync_api import sync_playwright
-
+def pending_title_bouts(env: str, since: str) -> list[tuple[dict, dict]]:
+    """Title bouts LANDING holds (from a crawl since `since`) whose bout page was
+    never fetched — a crawl stopped by its budget or a challenge — as (bout, event)."""
     cur = snowflake_cursor(env)
     cur.execute(MISSING_TITLE_BOUTS.replace("{ENV}", env.upper()), (since,))
-    todo = [(json.loads(p), {"event_date_index": d, "status": st}) for p, d, st in cur.fetchall()][:limit]
-    log(f"{len(todo)} title bouts in LANDING since {since} have no bout page")
+    return [(json.loads(p), {"event_date_index": d, "status": st}) for p, d, st in cur.fetchall()]
 
-    fetch_date = date.today().isoformat()
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "meta.json").write_text(json.dumps({"fetch_date": fetch_date, "env": env, "mode": "title_bouts"}))
-    rows = {t: [] for t in TABLES}
-    pages, anomalies, report, stopped = [], [], Counter(), None
+
+def backfill_title_bouts(since: str, limit: int, sleep: float, budget: Budget, env: str, run_dir: Path) -> dict:
+    """Only the missing title-bout pages since `since`, no new events."""
+    todo = pending_title_bouts(env, since)[: limit or None]
+    log(f"{len(todo)} title bouts in LANDING since {since} have no bout page")
     if not todo:
-        return {"fetch_date": fetch_date, "rows": rows, "pages": pages,
-                "report": dict(report), "anomalies": anomalies, "stopped": None}
-    with sync_playwright() as pw:
-        br = Browser(pw)
-        try:
-            if not br.open():
-                raise Blocked("Cloudflare did not clear on the first page")
-            for b, e_row in todo:
-                url = f"{BASE}/fightcenter/bouts/{b['bout_slug']}"
-                html, status = polite_fetch(br, url, c3b.JS, sleep)
-                if html is None or ("boutComparisonTable" not in html and "Bout Information" not in html):
-                    report[f"bout_miss_{status}"] += 1
-                    continue
-                key = raw_html_key("tapology", "bout", fetch_date, b["bout_slug"], env)
-                local = run_dir / "raw" / "bout" / f"{b['bout_slug']}.html.gz"
-                local.parent.mkdir(parents=True, exist_ok=True)
-                with gzip.open(local, "wb", compresslevel=6) as f:
-                    f.write(html.encode("utf-8"))
-                pages.append((local, key))
-                d, qa = bout_row(parse_bout_page(html, url), b, e_row, key, fetch_date)
-                anomalies += qa
-                rows["bout_details"].append(d)
-                report["bout_pages_kept"] += 1
-                log(f"  bout page {report['bout_pages_kept']}/{len(todo)} {b['bout_slug'][:70]}")
-        except Blocked as e:
-            stopped = f"stopped: Cloudflare challenge at {e}"
-            log(stopped)
-        finally:
-            br.close()
-    return {"fetch_date": fetch_date, "rows": rows, "pages": pages,
-            "report": dict(report), "anomalies": anomalies, "stopped": stopped}
+        fetch_date = date.today().isoformat()
+        return {"fetch_date": fetch_date, "rows": {t: [] for t in TABLES}, "pages": [],
+                "report": {}, "anomalies": [], "stopped": None}
+    return crawl(0, sleep, budget, env, run_dir, set(), {}, todo, discover_events=False)
 
 
 def load_landing_cli(env: str) -> bool:
@@ -551,9 +704,10 @@ def load_landing_cli(env: str) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--limit", type=int, default=10, help="completed events to keep")
+    ap.add_argument("--limit", type=int, default=0, help="completed events to keep (0: as many as the budget allows)")
     ap.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help=f"seconds between requests (default {DEFAULT_SLEEP})")
-    ap.add_argument("--max-pages", type=int, default=3, help="results pages to scan for new events")
+    ap.add_argument("--max-requests", type=int, default=DAILY_BUDGET,
+                    help=f"requests this run may spend, within today's {DAILY_BUDGET} for this IP")
     ap.add_argument("--dry-run", action="store_true", help="crawl and stage locally; upload and load nothing")
     ap.add_argument("--from-run", metavar="RUN_ID",
                     help="re-parse that run's archived pages instead of crawling (no network to Tapology)")
@@ -576,16 +730,19 @@ def main() -> int:
         result = rebuild(run_dir, env)
         known -= {e["event_slug"] for e in result["rows"]["event_details"]}   # this run's own pages
         log(f"rebuilt {result['report']} from {run_dir.relative_to(ROOT)}/raw")
-    elif args.title_bouts_since:
-        result = backfill_title_bouts(args.title_bouts_since, args.limit, args.sleep, env, run_dir)
     else:
-        result = crawl(args.limit, args.sleep, args.max_pages, env, run_dir, known)
+        with ip_budget(lake, args.max_requests) as budget:
+            if args.title_bouts_since:
+                result = backfill_title_bouts(args.title_bouts_since, args.limit, args.sleep, budget, env, run_dir)
+            else:
+                result = daily_crawl(lake, env, run_dir, args.limit, args.sleep, budget, known)
     shutil.rmtree(run_dir / "tables", ignore_errors=True)      # staging is rebuilt whole
     shutil.rmtree(run_dir / "parsed", ignore_errors=True)
     staged = stage(result["rows"], run_dir, run_id)
 
     if not args.dry_run:
         n_pages, n_files = upload(lake, result, staged, run_dir, env)
+        save_queue(lake, env, result)
         log(f"uploaded {n_pages} pages and {n_files} Parquet files")
 
     checks = verify(result, staged, run_dir, env, None if args.dry_run else lake, known)

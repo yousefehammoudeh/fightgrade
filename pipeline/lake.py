@@ -15,7 +15,7 @@ Parquet files are named per run, never `data_0.parquet`: LANDING skips files it
 has already loaded *by name*, so a rewritten partition must arrive as a new file
 or its corrections are never loaded. CLEANSING keeps the latest copy of each row.
 """
-import os
+import json, os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,8 +58,6 @@ JSON_ROW_COLUMNS = "{'_json': 'VARCHAR', '_raw_html_key': 'VARCHAR', 'fetch_date
 
 def write_json_rows(path: Path, items) -> None:
     """items: (row, raw_html_key, fetch_date) -> one wrapped JSONL line each."""
-    import json
-
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for row, key, fetch_date in items:
@@ -93,7 +91,7 @@ class Lake:
     Application Default Credentials (`gcloud auth application-default login`)."""
 
     def __init__(self, env: str | None = None):
-        import base64, json
+        import base64
         from google.cloud import storage   # imported here so parsing code needs no GCP libs
 
         self.env = env or environment()
@@ -109,6 +107,13 @@ class Lake:
 
     def upload_file(self, local: Path, key: str, content_type: str) -> None:
         self.bucket.blob(key).upload_from_filename(str(local), content_type=content_type)
+
+    def read_json(self, key: str, default):
+        blob = self.bucket.get_blob(key)
+        return default if blob is None else json.loads(blob.download_as_text())
+
+    def write_json(self, key: str, obj) -> None:
+        self.bucket.blob(key).upload_from_string(json.dumps(obj, indent=1), content_type="application/json")
 
     def size(self, key: str) -> int | None:
         blob = self.bucket.get_blob(key)

@@ -12,7 +12,11 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
   dbt_resync_dev   DEV = PROD. Weekly, Sunday 04:00, after that night's build.
                    Drops DEV-only tables, so it is weekly rather than daily.
   tapology_crawl   newly completed Tapology events -> lake -> LANDING
-                   (orchestration/tapology.py). Local Dagster only, for now.
+                   (orchestration/tapology.py). Daily at 02:00, Tapology's
+                   quiet hour: its audience is ~41% US, then the UK and central
+                   Europe, so 2 a.m. Eastern falls after US midnight and before
+                   Europe's morning. Its fetch stops by 02:30, so LANDING is
+                   loaded before the 03:00 build publishes it.
 
 Schedules run only on the Dagster+ production deployment. Locally they start
 stopped, so a laptop never races the cloud for the same 03:00 build, and a
@@ -98,6 +102,12 @@ defs = Definitions(
         ScheduleDefinition(
             job=dbt_prod_build,
             cron_schedule="0 3 * * *",
+            execution_timezone=TIMEZONE,
+            default_status=SCHEDULE_STATUS,
+        ),
+        ScheduleDefinition(
+            job=tapology_crawl,
+            cron_schedule="0 2 * * *",
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
