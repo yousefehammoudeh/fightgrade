@@ -672,14 +672,15 @@ def egress_ip() -> str:
 
 
 @contextmanager
-def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES):
+def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int = DAILY_BUDGET):
     """Today's remaining requests on this egress IP, recorded in the lake after the
     run whether it finished or not: a request spent is spent.
 
     Serverless runs leave through 15 shared IPs, so two runs at once can land on
     the same one. The first takes a lock on it; a second gets no budget and stops
     before its first request. A lock older than LOCK_STALE_HOURS is a run that
-    died without releasing it."""
+    died without releasing it. `daily` raises the per-IP cap for a backfill, whose
+    guardrails are then the 503/429 stop and the challenge limit."""
     ip, today = egress_ip(), date.today().isoformat()
     lock = f"{LOCK_PREFIX}{ip}.json"
     held = lake.create(lock, {"since": time.time()})
@@ -687,8 +688,8 @@ def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES)
         lake.delete(lock)
         held = lake.create(lock, {"since": time.time()})
     spent = lake.read_json(BUDGET_KEY, {}).get(ip, {}).get(today, 0)
-    budget = Budget(max(min(max_requests, DAILY_BUDGET - spent), 0) if held else 0, minutes)
-    log(f"egress IP {ip}: {spent}/{DAILY_BUDGET} requests spent today, this run may spend {budget.limit}"
+    budget = Budget(max(min(max_requests, daily - spent), 0) if held else 0, minutes)
+    log(f"egress IP {ip}: {spent}/{daily} requests spent today, this run may spend {budget.limit}"
         + ("" if held else " (another run holds this IP)"))
     try:
         yield budget
