@@ -11,12 +11,22 @@
 # One integration serves both environments; each environment gets its own
 # stage in its LANDING schema, so dbt's `@<target.database>.landing.lake_parsed`
 # resolves in either.
+#
+# The bucket is split the same way Snowflake is. PROD reads the top-level
+# parsed/ zone; DEV reads dev/parsed/, where local and branch-deployment crawls
+# write. A test crawl therefore can never reach PROD's 03:00 build.
 # ─────────────────────────────────────────────────────────────────────
 
+locals {
+  lake_zone = { PROD = "", DEV = "dev/" }
+}
+
 resource "snowflake_storage_integration_gcs" "lake" {
-  name                      = "FIGHTGRADE_LAKE"
-  enabled                   = true
-  storage_allowed_locations = ["gcs://${google_storage_bucket.lake.name}/parsed/"]
+  name    = "FIGHTGRADE_LAKE"
+  enabled = true
+  storage_allowed_locations = [
+    for z in values(local.lake_zone) : "gcs://${google_storage_bucket.lake.name}/${z}parsed/"
+  ]
 }
 
 # Exactly the three permissions Snowflake needs to load: nothing to write or delete.
@@ -51,7 +61,7 @@ resource "snowflake_stage_external_gcs" "lake" {
   database            = snowflake_database.env[each.key].name
   schema              = snowflake_schema.layer["${each.key}.LANDING"].name
   name                = "LAKE_PARSED"
-  url                 = "gcs://${google_storage_bucket.lake.name}/parsed/"
+  url                 = "gcs://${google_storage_bucket.lake.name}/${local.lake_zone[each.key]}parsed/"
   storage_integration = snowflake_storage_integration_gcs.lake.name
   file_format {
     format_name = snowflake_file_format_parquet.parquet[each.key].fully_qualified_name

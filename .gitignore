@@ -2,6 +2,7 @@
 data/
 _s3stage/
 _parsedstage/
+_crawlruns/
 logs/
 outputs/
 graph/

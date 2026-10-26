@@ -2,8 +2,12 @@
 """Stage the parsed Tapology tables as Parquet for the lake's ``parsed/`` zone.
 
 Each JSONL table becomes
-``parsed/entity=<table>/fetch_date=YYYY-MM-DD/data_0.parquet``, unfiltered -- scope
+``parsed/entity=<table>/fetch_date=YYYY-MM-DD/part-<run_id>-<i>.parquet``, unfiltered -- scope
 filters belong in REFINED, not LANDING (DESIGN.md §5).
+
+Every file has three columns (pipeline/lake.py): ``_json``, the source row as its exact
+JSON line, untouched; ``_raw_html_key``; and ``fetch_date``. Nothing is type-inferred, so
+the bulk load and every later crawl arrive in LANDING with the same payload shape.
 
 Page-level rows are partitioned by the fetch date of the archived page they were parsed
 from, and carry ``_raw_html_key``: the exact object key of that page in ``raw-html/``.
@@ -25,6 +29,9 @@ import duckdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stage_archive_for_s3 import STAGE as ARCHIVE_STAGE, plan as archive_plan
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pipeline.lake import jsonl_lines, new_run_id, parquet_copy_options
 
 ROOT  = Path(__file__).resolve().parent.parent
 DATA  = ROOT / "data"
@@ -61,16 +68,14 @@ def load_pages(con):
 
 
 def source_sql(src, link):
-    # sample_size=-1 infers the schema from every row, so sparse keys (production.*,
-    # bout_counts.*) are not dropped.
-    read = f"read_json('{src}', format='newline_delimited', sample_size=-1)"
+    read = jsonl_lines(src)
     if link is None:
         mtime = datetime.date.fromtimestamp(src.stat().st_mtime).isoformat()
-        return (f"SELECT t.*, CAST(NULL AS VARCHAR) AS _raw_html_key, DATE '{mtime}' AS fetch_date "
+        return (f"SELECT t._json, CAST(NULL AS VARCHAR) AS _raw_html_key, DATE '{mtime}' AS fetch_date "
                 f"FROM {read} t")
     entity, col = link
-    return (f"SELECT t.*, p.raw_html_key AS _raw_html_key, p.fetch_date "
-            f"FROM {read} t LEFT JOIN pages p ON p.entity = '{entity}' AND p.slug = t.{col}")
+    return (f"SELECT t._json, p.raw_html_key AS _raw_html_key, p.fetch_date FROM {read} t "
+            f"LEFT JOIN pages p ON p.entity = '{entity}' AND p.slug = json_extract_string(t._json, '$.{col}')")
 
 
 def main():
@@ -103,21 +108,24 @@ def main():
         print(f"\ndry run. --commit to write {STAGE}/parsed/")
         return
 
-    print()
+    # A run-stamped file name, so a re-staged table arrives as new files LANDING
+    # will load rather than as a data_0.parquet it already skipped.
+    run_id = new_run_id()
+    print(f"\nrun {run_id}")
     for name, rows in plans:
         out = STAGE / "parsed" / f"entity={name}"
         if out.exists():
             shutil.rmtree(out)  # a table is rebuilt whole, never merged into
         out.parent.mkdir(parents=True, exist_ok=True)
-        con.execute(f"COPY src_{name} TO '{out}' (FORMAT parquet, COMPRESSION zstd, "
-                    f"PARTITION_BY (fetch_date), WRITE_PARTITION_COLUMNS true)")
+        con.execute(f"COPY src_{name} TO '{out}' ({parquet_copy_options(run_id)})")
         written = con.execute(f"SELECT count(*) FROM read_parquet('{out}/*/*.parquet')").fetchone()[0]
         size = sum(f.stat().st_size for f in out.rglob("*.parquet"))
         if written != rows:
             sys.exit(f"REFUSING: {name} wrote {written:,} of {rows:,} rows")
         print(f"  {name:<18} {written:>10,} rows  {size / 2**20:>8.1f} MiB  -> {out.relative_to(ROOT)}")
 
-    print(f"\nnext:\n  gcloud storage rsync -r {STAGE.relative_to(ROOT)}/ gs://<bucket>/")
+    print(f"\nnext, DEV zone:  gcloud storage rsync -r {STAGE.relative_to(ROOT)}/parsed/ gs://<bucket>/dev/parsed/"
+          f"\n      PROD zone: gcloud storage rsync -r {STAGE.relative_to(ROOT)}/parsed/ gs://<bucket>/parsed/")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,17 @@
+.git
+.venv
+.github
+_crawlruns
+_parsedstage
+_s3stage
+data
+logs
+outputs
+graph
+samples
+analysis/out
+viewer/data
+terraform/.terraform
+**/__pycache__
+**/target
+**/logs
