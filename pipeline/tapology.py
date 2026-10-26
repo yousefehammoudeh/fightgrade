@@ -18,7 +18,7 @@ Cloudflare challenge mid-run gets a minute of quiet and one ordinary page load,
 at most twice; after that the crawl stops instead of hammering — a block that
 is kept warm never clears (HANDOFF.stage2.md §3).
 """
-import argparse, gzip, importlib.util, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, gzip, importlib.util, json, os, re, select, shutil, subprocess, sys, tempfile, time
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -79,10 +79,25 @@ def virtual_display() -> subprocess.Popen | None:
     xvfb = shutil.which("Xvfb")
     if not xvfb:
         raise RuntimeError("no display and no Xvfb: this machine cannot run headed Chrome")
-    proc = subprocess.Popen([xvfb, ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    os.environ["DISPLAY"] = ":99"
-    time.sleep(1.5)
+    # -displayfd: Xvfb picks a free display and writes its number to the pipe only
+    # once it accepts connections. A fixed sleep raced Chrome on Serverless.
+    ready_r, ready_w = os.pipe()
+    err = tempfile.TemporaryFile()
+    proc = subprocess.Popen([xvfb, "-displayfd", str(ready_w), "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+                            pass_fds=(ready_w,), stdout=subprocess.DEVNULL, stderr=err)
+    os.close(ready_w)
+    number = b""
+    with os.fdopen(ready_r, "rb", buffering=0) as ready:
+        while not number.endswith(b"\n") and select.select([ready], [], [], 20)[0]:
+            chunk = ready.read(16)
+            if not chunk:                        # Xvfb exited before it was ready
+                break
+            number += chunk
+    if not number.strip().isdigit():
+        proc.kill()
+        err.seek(0)
+        raise RuntimeError(f"Xvfb did not start: {err.read().decode(errors='replace')[-2000:] or 'no output'}")
+    os.environ["DISPLAY"] = f":{number.strip().decode()}"
     return proc
 
 
