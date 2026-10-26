@@ -7,6 +7,10 @@
 # No external ID, no trust policy, no circular bootstrap — that was AWS-specific
 # (DESIGN.md §11). Terraform earns its keep here on reproducibility, review and
 # teardown, not on dependency resolution.
+#
+# One integration serves both environments; each environment gets its own
+# stage in its LANDING schema, so dbt's `@<target.database>.landing.lake_parsed`
+# resolves in either.
 # ─────────────────────────────────────────────────────────────────────
 
 resource "snowflake_storage_integration_gcs" "lake" {
@@ -35,26 +39,29 @@ resource "google_storage_bucket_iam_member" "snowflake_lake_reader" {
 # this integration can point at raw-html/.
 
 resource "snowflake_file_format_parquet" "parquet" {
-  database         = snowflake_database.fightgrade.name
-  schema           = snowflake_schema.layer["LANDING"].name
+  for_each         = toset(local.envs)
+  database         = snowflake_database.env[each.key].name
+  schema           = snowflake_schema.layer["${each.key}.LANDING"].name
   name             = "PARQUET_FORMAT"
   use_logical_type = true # DATE and TIMESTAMP columns arrive typed, not as integers
 }
 
 resource "snowflake_stage_external_gcs" "lake" {
-  database            = snowflake_database.fightgrade.name
-  schema              = snowflake_schema.layer["LANDING"].name
+  for_each            = toset(local.envs)
+  database            = snowflake_database.env[each.key].name
+  schema              = snowflake_schema.layer["${each.key}.LANDING"].name
   name                = "LAKE_PARSED"
   url                 = "gcs://${google_storage_bucket.lake.name}/parsed/"
   storage_integration = snowflake_storage_integration_gcs.lake.name
   file_format {
-    format_name = snowflake_file_format_parquet.parquet.fully_qualified_name
+    format_name = snowflake_file_format_parquet.parquet[each.key].fully_qualified_name
   }
   depends_on = [google_storage_bucket_iam_member.snowflake_lake_reader]
 }
 
 resource "snowflake_grant_privileges_to_account_role" "transformer_integration" {
-  account_role_name = snowflake_account_role.transformer.name
+  for_each          = toset(local.envs)
+  account_role_name = snowflake_account_role.transformer[each.key].name
   privileges        = ["USAGE"]
   on_account_object {
     object_type = "INTEGRATION"
@@ -63,24 +70,26 @@ resource "snowflake_grant_privileges_to_account_role" "transformer_integration" 
 }
 
 resource "snowflake_grant_privileges_to_account_role" "transformer_stage" {
-  account_role_name = snowflake_account_role.transformer.name
+  for_each          = toset(local.envs)
+  account_role_name = snowflake_account_role.transformer[each.key].name
   privileges        = ["USAGE"]
   on_schema_object {
     object_type = "STAGE"
-    object_name = snowflake_stage_external_gcs.lake.fully_qualified_name
+    object_name = snowflake_stage_external_gcs.lake[each.key].fully_qualified_name
   }
 }
 
 resource "snowflake_grant_privileges_to_account_role" "transformer_file_format" {
-  account_role_name = snowflake_account_role.transformer.name
+  for_each          = toset(local.envs)
+  account_role_name = snowflake_account_role.transformer[each.key].name
   privileges        = ["USAGE"]
   on_schema_object {
     object_type = "FILE FORMAT"
-    object_name = snowflake_file_format_parquet.parquet.fully_qualified_name
+    object_name = snowflake_file_format_parquet.parquet[each.key].fully_qualified_name
   }
 }
 
-output "stage" {
-  value       = snowflake_stage_external_gcs.lake.fully_qualified_name
-  description = "LIST @<this>; should show the 17 Parquet files"
+output "stages" {
+  value       = { for e, s in snowflake_stage_external_gcs.lake : e => s.fully_qualified_name }
+  description = "LIST @<stage>; should show the 17 Parquet files"
 }

@@ -1,0 +1,7 @@
+# Python 3.13 — the Snowflake connector and dbt have no 3.15 builds yet.
+#   /opt/homebrew/bin/python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
+dagster==1.13.26
+dagster-webserver==1.13.26
+dbt-core==1.12.6
+dbt-snowflake==1.12.4
+duckdb==2.0.0

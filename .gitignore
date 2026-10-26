@@ -34,6 +34,7 @@ profiles.yml
 # ─── dbt / Dagster ──────────────────────────────────────────────────
 target/
 dbt_packages/
+.user.yml
 .dbt/
 *.duckdb
 *.duckdb.wal

@@ -1,0 +1,46 @@
+version: 2
+
+# Every LANDING table has the same shape: the source record as `payload`,
+# plus where it came from and when it was loaded.
+anchors:
+  - &landing_columns
+      - name: payload
+        description: The full source row, as loaded from Parquet.
+        data_tests: [not_null]
+      - name: _object_key
+        description: The Parquet file in parsed/ this row came from, relative to the stage.
+        data_tests: [not_null]
+      - name: _partition_date
+        description: The fetch_date partition — the day the source page was fetched.
+        data_tests: [not_null]
+      - name: _raw_html_key
+        description: Object key of the archived HTML page in raw-html/. Null for tables parsed from index pages.
+      - name: _file_last_modified
+        description: When the Parquet file was written to the bucket.
+      - name: _loaded_at
+        description: When this row was appended to LANDING.
+      - name: _batch_id
+        description: dbt invocation that appended this row.
+
+models:
+  - name: lnd_tapology_events
+    description: Event index listings, one row per event. No archived page, so _raw_html_key is null.
+    columns: *landing_columns
+  - name: lnd_tapology_event_details
+    description: Event pages, one row per event page. Join on payload:event_slug.
+    columns: *landing_columns
+  - name: lnd_tapology_bouts
+    description: One row per bout on a card, parsed from the event page.
+    columns: *landing_columns
+  - name: lnd_tapology_event_fighters
+    description: One row per fighter per bout, including fighters on cancelled and fizzled bouts.
+    columns: *landing_columns
+  - name: lnd_tapology_bout_details
+    description: Title-bout pages, including the 8,101 cancelled title bouts that never reached bouts.
+    columns: *landing_columns
+  - name: lnd_tapology_promotions
+    description: Promotion index rows (id, slug, name).
+    columns: *landing_columns
+  - name: lnd_tapology_promotion_details
+    description: Promotion pages (headquarters, acronyms, links).
+    columns: *landing_columns

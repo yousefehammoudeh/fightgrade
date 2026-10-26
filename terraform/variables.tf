@@ -33,7 +33,7 @@ variable "snowflake_account_name" {
 }
 
 variable "snowflake_user_name" {
-  description = "Your own Snowflake login, granted FIGHTGRADE_TRANSFORMER so you can run dbt as it."
+  description = "Your own Snowflake login, granted FIGHTGRADE_TRANSFORMER_DEV (never PROD)."
   type        = string
 }
 
@@ -41,6 +41,15 @@ variable "snowflake_private_key_path" {
   description = "Unencrypted PKCS#8 private key for TERRAFORM_SVC. Keep it outside the repo."
   type        = string
   default     = "~/.snowflake/keys/terraform_svc.p8"
+}
+
+variable "dbt_public_key_paths" {
+  description = "PEM public keys for DBT_DEV_SVC and DBT_PROD_SVC (openssl rsa -pubout). Only the public halves are read."
+  type        = map(string)
+  default = {
+    DEV  = "~/.snowflake/keys/dbt_dev_svc.pub"
+    PROD = "~/.snowflake/keys/dbt_prod_svc.pub"
+  }
 }
 
 variable "snowflake_credit_quota" {
