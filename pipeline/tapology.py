@@ -114,8 +114,10 @@ class Browser:
         self.profile = tempfile.mkdtemp(prefix="tap_chrome_")
         # A container's /dev/shm is tiny; without this Chrome crashes on big pages.
         args = ["--disable-dev-shm-usage"] if sys.platform.startswith("linux") else []
+        # env explicitly: Chrome is started by Playwright's driver process, which
+        # was spawned before virtual_display() set DISPLAY and never saw it.
         self.ctx = self.pw.chromium.launch_persistent_context(
-            user_data_dir=self.profile, channel="chrome", headless=False, args=args,
+            user_data_dir=self.profile, channel="chrome", headless=False, args=args, env=dict(os.environ),
             viewport={"width": 1280, "height": 900}, locale="en-US")
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
         self.page.goto(f"{BASE}/fightcenter", wait_until="domcontentloaded", timeout=60000)
