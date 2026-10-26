@@ -9,8 +9,10 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
 
   dbt_prod_build   PROD = main. Daily at 03:00, or launched by hand from the UI
                    for a rebuild now — optionally narrowed with `select`.
-  dbt_resync_dev   DEV = PROD. Weekly, Sunday 04:00, after that night's build.
-                   Drops DEV-only tables, so it is weekly rather than daily.
+  dbt_resync_dev   DEV = PROD, after every successful PROD build (the 03:00
+                   one, or one launched by hand), by the resync_dev sensor.
+                   Zero-copy clones, so it takes seconds; it drops DEV-only
+                   tables, so unmerged DEV work lasts until the next build.
   tapology_crawl   newly completed Tapology events -> lake -> LANDING
                    (orchestration/tapology.py). Daily at 02:00, Tapology's
                    quiet hour: its audience is ~41% US, then the UK and central
@@ -18,21 +20,26 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    Europe's morning. Its fetch stops by 02:30, so LANDING is
                    loaded before the 03:00 build publishes it.
 
-Schedules run only on the Dagster+ production deployment. Locally they start
-stopped, so a laptop never races the cloud for the same 03:00 build, and a
-branch deployment builds DEV instead of PROD.
+Schedules and the sensor run only on the Dagster+ production deployment.
+Locally they start stopped, so a laptop never races the cloud for the same 03:00
+build, and a branch deployment builds DEV instead of PROD.
 """
 from pathlib import Path
 
 from dagster import (
     Config,
+    DagsterRunStatus,
     DefaultScheduleStatus,
+    DefaultSensorStatus,
     Definitions,
     OpExecutionContext,
+    RunRequest,
+    RunStatusSensorContext,
     ScheduleDefinition,
     in_process_executor,
     job,
     op,
+    run_status_sensor,
 )
 
 from .dbt_cli import run_dbt
@@ -40,9 +47,9 @@ from .main_checkout import IN_DAGSTER_PLUS, IS_BRANCH_DEPLOYMENT, main_dbt_proje
 from .tapology import tapology_crawl
 
 TIMEZONE = "America/Toronto"
-SCHEDULE_STATUS = (
-    DefaultScheduleStatus.RUNNING if IN_DAGSTER_PLUS and not IS_BRANCH_DEPLOYMENT else DefaultScheduleStatus.STOPPED
-)
+ON_PROD = IN_DAGSTER_PLUS and not IS_BRANCH_DEPLOYMENT
+SCHEDULE_STATUS = DefaultScheduleStatus.RUNNING if ON_PROD else DefaultScheduleStatus.STOPPED
+SENSOR_STATUS = DefaultSensorStatus.RUNNING if ON_PROD else DefaultSensorStatus.STOPPED
 
 # Locally both jobs reset the same checkout; dagster.yaml queues them so they
 # never overlap.
@@ -96,6 +103,13 @@ def dbt_resync_dev():
     dbt_resync_dev_op(checkout_main())
 
 
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS, monitored_jobs=[dbt_prod_build],
+                   request_job=dbt_resync_dev, default_status=SENSOR_STATUS)
+def resync_dev(context: RunStatusSensorContext) -> RunRequest:
+    """DEV = PROD once a PROD build has succeeded; one resync per build."""
+    return RunRequest(run_key=context.dagster_run.run_id)
+
+
 defs = Definitions(
     jobs=[dbt_prod_build, dbt_resync_dev, tapology_crawl],
     schedules=[
@@ -111,11 +125,6 @@ defs = Definitions(
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
-        ScheduleDefinition(
-            job=dbt_resync_dev,
-            cron_schedule="0 4 * * 0",
-            execution_timezone=TIMEZONE,
-            default_status=SCHEDULE_STATUS,
-        ),
     ],
+    sensors=[resync_dev],
 )
