@@ -47,6 +47,12 @@ def bundled_dbt_project() -> Path:
     raise FileNotFoundError("no dbt project bundled with this code location")
 
 
+def dbt_project_for(env: str) -> Path:
+    """DEV may run unmerged code — that is what DEV is for — so it uses this code
+    location's own dbt project. PROD only ever runs main."""
+    return main_dbt_project()[0] if env == "prod" else bundled_dbt_project()
+
+
 def main_dbt_project() -> tuple[Path, str]:
     """The dbt project to run, and the commit (or deploy) it came from."""
     if IN_DAGSTER_PLUS:

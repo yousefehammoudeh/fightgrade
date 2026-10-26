@@ -5,12 +5,14 @@ locally for development with:
 
     orchestration/run_dagster.sh      UI on http://localhost:3000
 
-Two jobs, both built from main (main_checkout.py):
+Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
 
   dbt_prod_build   PROD = main. Daily at 03:00, or launched by hand from the UI
                    for a rebuild now — optionally narrowed with `select`.
   dbt_resync_dev   DEV = PROD. Weekly, Sunday 04:00, after that night's build.
                    Drops DEV-only tables, so it is weekly rather than daily.
+  tapology_crawl   newly completed Tapology events -> lake -> LANDING
+                   (orchestration/tapology.py). Local Dagster only, for now.
 
 Schedules run only on the Dagster+ production deployment. Locally they start
 stopped, so a laptop never races the cloud for the same 03:00 build, and a
@@ -31,6 +33,7 @@ from dagster import (
 
 from .dbt_cli import run_dbt
 from .main_checkout import IN_DAGSTER_PLUS, IS_BRANCH_DEPLOYMENT, main_dbt_project
+from .tapology import tapology_crawl
 
 TIMEZONE = "America/Toronto"
 SCHEDULE_STATUS = (
@@ -54,6 +57,10 @@ class ProdBuildConfig(Config):
     # Empty builds everything on main. A dbt selector ("landing",
     # "lnd_tapology_bouts+") narrows a manual run.
     select: str = ""
+    # Rebuild incremental tables from every file in the stage instead of
+    # appending new ones — for a deliberate reload, e.g. after the lake's files
+    # were re-staged. Never set by the schedule.
+    full_refresh: bool = False
 
 
 @op
@@ -65,6 +72,8 @@ def dbt_build_prod(context: OpExecutionContext, config: ProdBuildConfig, project
     args = ["build", "--target", target]
     if config.select:
         args += ["--select", config.select]
+    if config.full_refresh:
+        args += ["--full-refresh"]
     run_dbt(context, Path(project), *args)
 
 
@@ -84,7 +93,7 @@ def dbt_resync_dev():
 
 
 defs = Definitions(
-    jobs=[dbt_prod_build, dbt_resync_dev],
+    jobs=[dbt_prod_build, dbt_resync_dev, tapology_crawl],
     schedules=[
         ScheduleDefinition(
             job=dbt_prod_build,

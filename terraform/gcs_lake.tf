@@ -82,3 +82,27 @@ output "bucket" {
 output "bucket_url" {
   value = google_storage_bucket.lake.url
 }
+
+# ─── Who writes the lake from the cloud ──────────────────────────────
+# Dagster+ crawls write raw HTML and Parquet here. objectAdmin on this one
+# bucket: create, read, list, and overwrite (a re-staged partition replaces its
+# file). Nothing else in the project.
+#
+# The key is created by hand (gcloud iam service-accounts keys create), never
+# by Terraform, so it never lands in Terraform state. It lives only in the
+# Dagster+ FIGHTGRADE_GCP_SA_KEY variable.
+resource "google_service_account" "lake_writer" {
+  account_id   = "fightgrade-lake-writer"
+  display_name = "FightGrade lake writer (Dagster+ crawls)"
+  depends_on   = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "lake_writer" {
+  bucket = google_storage_bucket.lake.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.lake_writer.email}"
+}
+
+output "lake_writer_email" {
+  value = google_service_account.lake_writer.email
+}

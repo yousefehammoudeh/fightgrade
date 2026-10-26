@@ -23,8 +23,9 @@ env:
   DAGSTER_CLOUD_API_TOKEN: ${{ secrets.DAGSTER_CLOUD_API_TOKEN }}
   # Path to the root folder containing the dagster project
   DAGSTER_PROJECT_DIR: "."
-  # Enable PEX-based fast deploys (set to "false" to use Docker builds instead)
-  ENABLE_FAST_DEPLOYS: "true"
+  # Docker builds, not PEX fast deploys: the Tapology crawler needs Chrome and
+  # Xvfb in the image, which only a Dockerfile can install (see Dockerfile).
+  ENABLE_FAST_DEPLOYS: "false"
   # Python version used to deploy the project
   PYTHON_VERSION: "3.13"
   # GitHub token for PR comments and branch deployments
