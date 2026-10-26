@@ -44,6 +44,7 @@ from .main_checkout import IN_DAGSTER_PLUS, dbt_project_for
 class TapologyCrawlConfig(Config):
     limit: int = 0                          # completed events (or bout pages) to keep; 0 = no cap
     max_requests: int = tap.DAILY_BUDGET    # requests this run may spend, within today's budget for the IP
+    daily_budget: int = tap.DAILY_BUDGET    # the per-IP daily cap; a backfill may raise it
     sleep: float = tap.DEFAULT_SLEEP        # seconds between requests; 2.0 is the floor
     from_run: str = ""                      # re-process an archived run: no requests to Tapology
     title_bouts_since: str = ""             # YYYY-MM-DD: fetch missing title-bout pages instead
@@ -87,7 +88,7 @@ def tapology_fetch(context: OpExecutionContext, config: TapologyCrawlConfig) -> 
             result = tap.rebuild(run_dir, env)
             known -= {e["event_slug"] for e in result["rows"]["event_details"]}
         else:
-            with tap.ip_budget(lake, config.max_requests, config.max_minutes) as budget:
+            with tap.ip_budget(lake, config.max_requests, config.max_minutes, config.daily_budget) as budget:
                 if backfill and budget.limit == 0:
                     raise Failure("no budget on this egress IP (spent today, or another run holds it): "
                                   "launch this shard again")
