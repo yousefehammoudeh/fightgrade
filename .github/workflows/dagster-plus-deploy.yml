@@ -8,8 +8,11 @@ on:
     types: [opened, synchronize, reopened, closed]
 
 concurrency:
-  # Cancel in-progress deploys to same branch
-  group: ${{ github.ref }}/deploy
+  # Cancel in-progress deploys to same branch. Pull request runs are keyed on
+  # the PR's own branch: when a merged PR closes, github.ref becomes the base
+  # branch, so keying on it put the close run in main's group and it cancelled
+  # the prod deploy from the merge push (PR #2).
+  group: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}/deploy
   cancel-in-progress: true
 env:
   # The organization name in Dagster Cloud
