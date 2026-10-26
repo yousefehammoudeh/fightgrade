@@ -1,0 +1,12 @@
+# Copied into $DAGSTER_HOME by run_dagster.sh.
+
+# dbt_prod_build and dbt_resync_dev both reset ~/.fightgrade/main; never run
+# two at once.
+concurrency:
+  runs:
+    tag_concurrency_limits:
+      - key: fightgrade/checkout
+        limit: 1
+
+telemetry:
+  enabled: false

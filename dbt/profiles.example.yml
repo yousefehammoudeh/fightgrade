@@ -1,0 +1,30 @@
+# cp profiles.example.yml ~/.dbt/profiles.yml
+# It lives outside the repo so every checkout — yours and the main checkout
+# the prod job builds from — uses the same connection settings.
+#
+# dev is the default: plain `dbt build` writes FIGHTGRADE_DEV and nothing else.
+# prod needs `--target prod` AND the prod key — on a laptop that should be rare;
+# prod is what main builds.
+fightgrade:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: ORGNAME-ACCOUNTNAME # SELECT CURRENT_ORGANIZATION_NAME() || '-' || CURRENT_ACCOUNT_NAME();
+      user: DBT_DEV_SVC
+      private_key_path: "{{ env_var('HOME') }}/.snowflake/keys/dbt_dev_svc.p8"
+      role: FIGHTGRADE_TRANSFORMER_DEV
+      warehouse: FIGHTGRADE_WH
+      database: FIGHTGRADE_DEV
+      schema: STAGING # only for models that set no schema of their own
+      threads: 4
+    prod:
+      type: snowflake
+      account: ORGNAME-ACCOUNTNAME
+      user: DBT_PROD_SVC
+      private_key_path: "{{ env_var('HOME') }}/.snowflake/keys/dbt_prod_svc.p8"
+      role: FIGHTGRADE_TRANSFORMER_PROD
+      warehouse: FIGHTGRADE_WH
+      database: FIGHTGRADE_PROD
+      schema: STAGING
+      threads: 4

@@ -1,0 +1,22 @@
+name: fightgrade
+version: "1.0.0"
+profile: fightgrade
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  prod_database: FIGHTGRADE_PROD
+  layers: [LANDING, STAGING, CLEANSING, REFINED, PUBLISHED]
+
+models:
+  fightgrade:
+    # LANDING is append-only, one table per source entity, unfiltered and untyped
+    # (DESIGN.md §5). Each run appends only the Parquet files not loaded yet.
+    landing:
+      +schema: LANDING
+      +materialized: incremental
+      +incremental_strategy: append
