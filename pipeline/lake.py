@@ -115,6 +115,27 @@ class Lake:
     def write_json(self, key: str, obj) -> None:
         self.bucket.blob(key).upload_from_string(json.dumps(obj, indent=1), content_type="application/json")
 
+    def create(self, key: str, obj) -> bool:
+        """Write `key` only if it does not exist yet, atomically. False if it did."""
+        from google.api_core.exceptions import PreconditionFailed
+        try:
+            self.bucket.blob(key).upload_from_string(json.dumps(obj), content_type="application/json",
+                                                     if_generation_match=0)
+            return True
+        except PreconditionFailed:
+            return False
+
+    def age_seconds(self, key: str) -> float | None:
+        blob = self.bucket.get_blob(key)
+        return None if blob is None else (datetime.now(timezone.utc) - blob.time_created).total_seconds()
+
+    def delete(self, key: str) -> None:
+        from google.api_core.exceptions import NotFound
+        try:
+            self.bucket.blob(key).delete()
+        except NotFound:
+            pass
+
     def size(self, key: str) -> int | None:
         blob = self.bucket.get_blob(key)
         return None if blob is None else blob.size

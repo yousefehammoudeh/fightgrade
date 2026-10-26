@@ -107,6 +107,8 @@ async (u) => {
 """
 BOUT_LOOKBACK_DAYS = 30     # title bouts loaded this recently with no bout page are retried
 BUDGET_KEY = "state/tapology/ip_budget.json"     # zone-less: DEV and PROD runs share the IP
+LOCK_PREFIX = "state/tapology/ip_lock/"           # one run per egress IP at a time
+LOCK_STALE_HOURS = 3
 
 
 def queue_key(env: str) -> str:
@@ -375,8 +377,9 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
     not finished yet (results not entered) is retried daily for MAX_TRIES days,
     counted from its date: an upcoming one (the listing's sidebar links featured
     events) waits in the queue until then without spending a try.
-    With discover_events=False only `pending_bouts` are fetched and the queue is
-    left as it is. `sweep_from` (since, id_floor) also sweeps the sitemap, queued
+    With discover_events=False only `state`'s queue and `pending_bouts` are
+    fetched, and the saved queue is left as it is (the leftovers come back as
+    "leftover"). `sweep_from` (since, id_floor) also sweeps the sitemap, queued
     after everything else."""
     from playwright.sync_api import sync_playwright
 
@@ -394,7 +397,7 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
     abandoned = set(state.get("abandoned", []))
     resume = state.get("resume_page")
     last_sweep = state.get("last_sweep")
-    worklist: list[dict] = []
+    worklist: list[dict] = [] if discover_events else list(queue)
     done: set[str] = set()                      # fetched this run, whatever the outcome
     retry: list[dict] = []
 
@@ -515,7 +518,8 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
     state_next = {"queue": queue_next, "abandoned": sorted(abandoned), "resume_page": resume,
                   "last_sweep": last_sweep}
     return {"fetch_date": fetch_date, "rows": rows, "pages": pages, "report": dict(report), "anomalies": anomalies,
-            "stopped": stopped, "state": state_next if discover_events else None}
+            "stopped": stopped, "state": state_next if discover_events else None,
+            "leftover": queue_next, "abandoned": sorted(abandoned)}
 
 
 def rebuild(run_dir: Path, env: str) -> dict:
@@ -668,22 +672,35 @@ def egress_ip() -> str:
 
 
 @contextmanager
-def ip_budget(lake: Lake, max_requests: int):
+def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES):
     """Today's remaining requests on this egress IP, recorded in the lake after the
-    run whether it finished or not: a request spent is spent."""
+    run whether it finished or not: a request spent is spent.
+
+    Serverless runs leave through 15 shared IPs, so two runs at once can land on
+    the same one. The first takes a lock on it; a second gets no budget and stops
+    before its first request. A lock older than LOCK_STALE_HOURS is a run that
+    died without releasing it."""
     ip, today = egress_ip(), date.today().isoformat()
+    lock = f"{LOCK_PREFIX}{ip}.json"
+    held = lake.create(lock, {"since": time.time()})
+    if not held and (lake.age_seconds(lock) or 0) > LOCK_STALE_HOURS * 3600:
+        lake.delete(lock)
+        held = lake.create(lock, {"since": time.time()})
     spent = lake.read_json(BUDGET_KEY, {}).get(ip, {}).get(today, 0)
-    budget = Budget(max(min(max_requests, DAILY_BUDGET - spent), 0))
-    log(f"egress IP {ip}: {spent}/{DAILY_BUDGET} requests spent today, this run may spend {budget.limit}")
+    budget = Budget(max(min(max_requests, DAILY_BUDGET - spent), 0) if held else 0, minutes)
+    log(f"egress IP {ip}: {spent}/{DAILY_BUDGET} requests spent today, this run may spend {budget.limit}"
+        + ("" if held else " (another run holds this IP)"))
     try:
         yield budget
     finally:
-        ledger = lake.read_json(BUDGET_KEY, {})
-        week_ago = (date.today() - timedelta(days=7)).isoformat()
-        days = {d: n for d, n in ledger.get(ip, {}).items() if d > week_ago}
-        days[today] = days.get(today, 0) + budget.spent
-        ledger[ip] = days
-        lake.write_json(BUDGET_KEY, ledger)
+        if held:
+            ledger = lake.read_json(BUDGET_KEY, {})
+            week_ago = (date.today() - timedelta(days=7)).isoformat()
+            days = {d: n for d, n in ledger.get(ip, {}).items() if d > week_ago}
+            days[today] = days.get(today, 0) + budget.spent
+            ledger[ip] = days
+            lake.write_json(BUDGET_KEY, ledger)
+            lake.delete(lock)
 
 
 def daily_crawl(lake: Lake, env: str, run_dir: Path, limit: int, sleep: float, budget: Budget,
@@ -712,6 +729,65 @@ def sweep_id_floor(env: str, since: str) -> int:
                 (since, since))
     low = cur.fetchone()[0]
     return max((low or 0) - 4000, 0)
+
+
+def backfill_key(env: str, name: str) -> str:
+    return f"{zone(env)}state/tapology/backfill/{name}.json"
+
+
+def unfinished_until(env: str, until: str) -> list[str]:
+    """Bulk-archived events dated by `until` that were saved before they finished."""
+    cur = snowflake_cursor(env)
+    cur.execute("""select payload:event_slug::string from FIGHTGRADE_PROD.LANDING.LND_TAPOLOGY_EVENT_DETAILS
+                   qualify row_number() over (partition by payload:event_slug order by _loaded_at desc) = 1
+                     and payload:status::string <> 'Completed' and payload:event_date_index::date <= %s::date""",
+                (until,))
+    return [r[0] for r in cur.fetchall()]
+
+
+def plan_backfill(lake: Lake, env: str, until: str, known: set[str], sleep: float, budget: Budget) -> dict:
+    """The gap since the bulk archive, as one fixed list that shards split: every
+    sitemap entry changed since BULK_ARCHIVE_DATE that is not archived, plus the
+    bulk's unfinished events dated by `until`. Fetches ~7 sitemaps, no events.
+
+    The sitemap carries no dates, so events after `until` (and upcoming ones) are
+    in the plan too: a shard keeps every completed event it fetches and hands the
+    rest back as leftovers for the daily queue."""
+    from playwright.sync_api import sync_playwright
+
+    floor = sweep_id_floor(env, BULK_ARCHIVE_DATE)
+    with sync_playwright() as pw:
+        br = Browser(pw, budget)
+        try:
+            if not br.open():
+                raise Blocked("Cloudflare did not clear on the first page")
+            swept, complete, stop = sweep(br, known, BULK_ARCHIVE_DATE, floor, sleep)
+        finally:
+            br.close()
+    if not complete:
+        raise RuntimeError(f"sitemap sweep unfinished ({stop or 'a sub-sitemap failed'}); no plan written")
+    extra = [e for e in unfinished_until(env, until) if e not in set(swept)]
+    plan = {"until": until, "created": date.today().isoformat(), "since": BULK_ARCHIVE_DATE,
+            "id_floor": floor, "slugs": swept + extra}
+    lake.write_json(backfill_key(env, "plan"), plan)
+    log(f"backfill plan: {len(swept)} events from the sitemap + {len(extra)} unfinished bulk events "
+        f"= {len(plan['slugs'])}, in {backfill_key(env, 'plan')}")
+    return {"fetch_date": plan["created"], "rows": {t: [] for t in TABLES}, "pages": [], "anomalies": [],
+            "report": {"planned": len(plan["slugs"]), "requests": budget.spent}, "stopped": None}
+
+
+def backfill_shard(lake: Lake, env: str, run_dir: Path, sleep: float, budget: Budget, known: set[str],
+                   shard: int, shards: int) -> dict:
+    """Shard `shard` of `shards` of the saved plan: every shards-th event, minus what is
+    archived by now, so a shard cut short by its IP's budget is simply run again."""
+    plan = lake.read_json(backfill_key(env, "plan"), None)
+    if plan is None:
+        raise RuntimeError("no backfill plan: run with backfill_until first")
+    mine = [s for i, s in enumerate(plan["slugs"]) if i % shards == shard]
+    todo = [s for s in mine if s not in known]
+    log(f"backfill shard {shard}/{shards}: {len(mine)} events in the plan, {len(todo)} not archived yet")
+    return crawl(0, sleep, budget, env, run_dir, known, {"queue": [{"slug": s, "tries": 0} for s in todo]}, [],
+                 discover_events=False)
 
 
 def save_queue(lake: Lake, env: str, result: dict) -> None:
@@ -808,6 +884,8 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help=f"seconds between requests (default {DEFAULT_SLEEP})")
     ap.add_argument("--max-requests", type=int, default=DAILY_BUDGET,
                     help=f"requests this run may spend, within today's {DAILY_BUDGET} for this IP")
+    ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES,
+                    help=f"stop fetching after this many minutes (default {MAX_FETCH_MINUTES}, for the 03:00 build)")
     ap.add_argument("--dry-run", action="store_true", help="crawl and stage locally; upload and load nothing")
     ap.add_argument("--from-run", metavar="RUN_ID",
                     help="re-parse that run's archived pages instead of crawling (no network to Tapology)")
@@ -831,7 +909,7 @@ def main() -> int:
         known -= {e["event_slug"] for e in result["rows"]["event_details"]}   # this run's own pages
         log(f"rebuilt {result['report']} from {run_dir.relative_to(ROOT)}/raw")
     else:
-        with ip_budget(lake, args.max_requests) as budget:
+        with ip_budget(lake, args.max_requests, args.max_minutes) as budget:
             if args.title_bouts_since:
                 result = backfill_title_bouts(args.title_bouts_since, args.limit, args.sleep, budget, env, run_dir)
             else:
