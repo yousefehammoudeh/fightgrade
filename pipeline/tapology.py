@@ -11,8 +11,9 @@ of the 820k rows already in LANDING.
 
 Only COMPLETED events are kept. Discovery is /fightcenter?schedule=results,
 newest first, read back to the first page with nothing new on it, minus every
-event already archived or queued. Title bouts on those cards also get their
-bout page, which is what bout_details is built from.
+event already archived or queued. The listing stops at 15 pages (~two weeks),
+so a weekly sweep of the sitemap queues what it cannot reach. Title bouts on
+those cards also get their bout page, which is what bout_details is built from.
 
 Polite by construction: one browser, one page at a time, no retry loops, and
 at most DAILY_BUDGET requests a day from one IP. Work the budget cannot reach
@@ -78,6 +79,27 @@ RATE_LIMITED = (429, 503)   # per-IP: waiting does nothing (HANDOFF.md §8), so 
 MAX_TRIES = 7               # days an event may stay unfinished in the queue before it is dropped
 DISCOVERY_SHARE = 3         # discovery may spend at most 1/3 of a run's budget
 RESUME_OVERLAP = 6          # results pages a day's new events can push the listing down, and then some
+LISTING_PAGES = 15          # the results listing stops there: every later page repeats page 15
+# The listing reaches back ~375 events (two weeks). The sitemap reaches everything:
+# 4,000 event ids per sub-sitemap, each entry with a <lastmod>. A weekly sweep of
+# the recent-id sub-sitemaps queues what the listing cannot: results entered late
+# for older events, and the gap since the bulk archive (its last full day below).
+SWEEP_EVERY_DAYS = 7
+BULK_ARCHIVE_DATE = "2026-08-21"
+SITEMAP_INDEX = f"{BASE}/sitemap.xml"
+SITEMAP_ENTRY = re.compile(r"<loc>[^<]*/fightcenter/events/(\d+)-([A-Za-z0-9-]+)</loc>\s*<lastmod>([0-9-]+)</lastmod>")
+# c3.JS rejects bodies under 5 kB as Tapology's "Temporarily Unavailable" page; an
+# empty sub-sitemap is 110 bytes, so sitemaps get their own fetch.
+SITEMAP_JS = r"""
+async (u) => {
+  try {
+    const r = await fetch(u, {credentials:"include"});
+    const b = await r.text();
+    if (/Just a moment/i.test(b)) return {status:"CHALLENGE", html:null};
+    return {status:r.status, html: r.ok ? b : null};
+  } catch (e) { return {status:"FAIL", html:null}; }
+}
+"""
 BOUT_LOOKBACK_DAYS = 30     # title bouts loaded this recently with no bout page are retried
 BUDGET_KEY = "state/tapology/ip_budget.json"     # zone-less: DEV and PROD runs share the IP
 
@@ -247,6 +269,8 @@ def discover(br: Browser, accounted: set[str], sleep: float, cap: int, resume_pa
         nonlocal read, stopped
         n, found_here, empty = first, 0, 0
         while True:
+            if n > LISTING_PAGES:
+                return None
             if read >= cap:
                 return n
             url = f"{BASE}/fightcenter?schedule=results" + (f"&page={n}" if n > 1 else "")
@@ -280,6 +304,40 @@ def discover(br: Browser, accounted: set[str], sleep: float, cap: int, resume_pa
     return found, resume, stopped
 
 
+def sweep(br: Browser, accounted: set[str], since: str, id_floor: int, sleep: float
+          ) -> tuple[list[str], bool, Stop | None]:
+    """Events whose sitemap entry changed on or after `since`, with an id at or above
+    `id_floor`, that are neither archived nor queued — newest id first. Reads the
+    index, then the event sub-sitemaps from the one holding `id_floor` up to the
+    first empty one: ~5 requests. Also returns whether every sub-sitemap was read
+    (if not, the sweep is due again next run) and the Stop that cut it short."""
+    found: list[str] = []
+    try:
+        index, status = polite_fetch(br, SITEMAP_INDEX, SITEMAP_JS, sleep)
+        if index is None:
+            log(f"  sitemap index: {status}")
+            return [], False, None
+        subs = re.findall(r"<loc>([^<]*/events/sitemap(?:_(\d+))?\.xml)</loc>", index)
+        for url, n in sorted(subs, key=lambda u: int(u[1] or 1)):
+            if int(n or 1) * 4000 <= id_floor:      # sub-sitemap n holds ids [(n-1)*4000, n*4000)
+                continue
+            xml, status = polite_fetch(br, url, SITEMAP_JS, sleep)
+            if xml is None:
+                log(f"  sitemap {url.rsplit('/', 1)[-1]}: {status}")
+                return found, False, None
+            entries = SITEMAP_ENTRY.findall(xml)
+            new = [f"{i}-{name}" for i, name, mod in entries
+                   if int(i) >= id_floor and mod >= since and f"{i}-{name}" not in accounted]
+            log(f"  sitemap {url.rsplit('/', 1)[-1]}: {len(entries)} events, {len(new)} changed since "
+                f"{since} and not archived or queued")
+            found += new
+            if not entries:
+                break
+        return sorted(set(found), key=lambda slug: -int(slug.split("-")[0])), True, None
+    except Stop as e:
+        return found, False, e
+
+
 def event_rows(ev: dict, slug: str, key: str, fetch_date: str) -> tuple[dict, list, list, list]:
     """One completed event page -> its event_details, bouts and event_fighters rows."""
     idx = {"slug": slug, "event_id": int(slug.split("-")[0]),
@@ -301,16 +359,20 @@ def bout_row(bp: dict, b: dict, e_row: dict, key: str, fetch_date: str) -> tuple
 
 
 def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, known: set[str],
-          state: dict, pending_bouts: list, discover_events: bool = True) -> dict:
+          state: dict, pending_bouts: list, discover_events: bool = True,
+          sweep_from: tuple[str, int] | None = None) -> dict:
     """Fetch, archive locally and parse, until the work or the budget runs out.
 
     Order: events new on the listing (newest first), then the queue earlier runs
     could not finish, then title-bout pages, older runs' first. Whatever is left
     goes back in the queue (`state`, saved to the lake once this run's pages are
     uploaded), so a short day defers work and never drops it. An event that is
-    not finished yet (results not entered) is retried daily for MAX_TRIES days.
+    not finished yet (results not entered) is retried daily for MAX_TRIES days,
+    counted from its date: an upcoming one (the listing's sidebar links featured
+    events) waits in the queue until then without spending a try.
     With discover_events=False only `pending_bouts` are fetched and the queue is
-    left as it is."""
+    left as it is. `sweep_from` (since, id_floor) also sweeps the sitemap, queued
+    after everything else."""
     from playwright.sync_api import sync_playwright
 
     fetch_date = date.today().isoformat()
@@ -326,6 +388,7 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
     queue = [q for q in state.get("queue", []) if q["slug"] not in known]
     abandoned = set(state.get("abandoned", []))
     resume = state.get("resume_page")
+    last_sweep = state.get("last_sweep")
     worklist: list[dict] = []
     done: set[str] = set()                      # fetched this run, whatever the outcome
     retry: list[dict] = []
@@ -361,11 +424,20 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
                 log(f"{len(new)} events new on the listing, {len(queue)} queued by earlier runs")
                 if stop:
                     raise stop
+                if sweep_from:
+                    swept, complete, stop = sweep(br, accounted | set(new), *sweep_from, sleep)
+                    worklist += [{"slug": s, "tries": 0} for s in swept]
+                    last_sweep = fetch_date if complete else last_sweep
+                    log(f"{len(swept)} more events from the sitemap" + ("" if complete else ", sweep unfinished"))
+                    if stop:
+                        raise stop
 
             title_bouts = list(pending_bouts)
             for item in worklist:
                 if limit and report["events_kept"] >= limit:
                     break
+                if item.get("after", "") > fetch_date:  # not held yet; stays queued
+                    continue
                 slug = item["slug"]
                 url = f"{BASE}/fightcenter/events/{slug}"
                 html, status = polite_fetch(br, url, c3.JS, sleep)
@@ -388,9 +460,13 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
                     anomalies.append({"slug": slug, "code": "parse_failed", "detail": f"{type(ex).__name__}: {ex}"})
                     defer(item, "parse_failed")
                     continue
-                if ev.get("status") != "Completed":       # completed events only; try again tomorrow
+                if ev.get("status") != "Completed":       # completed events only; try again later
                     report[f"event_skipped_{ev.get('status')}"] += 1
-                    defer(item, str(ev.get("status")))
+                    when = c3.page_date(ev) or ""           # no readable date: spends tries
+                    if when >= fetch_date:                  # today or later: no try spent yet
+                        retry.append({"slug": slug, "tries": item.get("tries", 0), "after": when})
+                    else:
+                        defer(item, str(ev.get("status")))
                     continue
                 key = archive("event", slug, html)
                 e_row, b_rows, l_rows, qa = event_rows(ev, slug, key, fetch_date)
@@ -427,11 +503,12 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
         finally:
             br.close()
 
-    left = [{"slug": q["slug"], "tries": q.get("tries", 0)} for q in (worklist or queue) if q["slug"] not in done]
+    left = [q for q in (worklist or queue) if q["slug"] not in done]
     queue_next = left + retry
     report.update(requests=budget.spent, queued_for_next_run=len(queue_next))
     log(f"{budget.spent} requests spent; {len(queue_next)} events queued for the next run")
-    state_next = {"queue": queue_next, "abandoned": sorted(abandoned), "resume_page": resume}
+    state_next = {"queue": queue_next, "abandoned": sorted(abandoned), "resume_page": resume,
+                  "last_sweep": last_sweep}
     return {"fetch_date": fetch_date, "rows": rows, "pages": pages, "report": dict(report), "anomalies": anomalies,
             "stopped": stopped, "state": state_next if discover_events else None}
 
@@ -611,7 +688,25 @@ def daily_crawl(lake: Lake, env: str, run_dir: Path, limit: int, sleep: float, b
     since = (date.today() - timedelta(days=BOUT_LOOKBACK_DAYS)).isoformat()
     bouts = pending_title_bouts(env, since)
     log(f"{len(state.get('queue', []))} events and {len(bouts)} title-bout pages deferred by earlier runs")
-    return crawl(limit, sleep, budget, env, run_dir, known, state, bouts)
+    sweep_from = None
+    last = state.get("last_sweep")
+    if not last or (date.today() - date.fromisoformat(last)).days >= SWEEP_EVERY_DAYS:
+        since = (date.fromisoformat(last) - timedelta(days=1)).isoformat() if last else BULK_ARCHIVE_DATE
+        sweep_from = (since, sweep_id_floor(env, since))
+        log(f"sitemap sweep due: entries changed since {since}, ids from {sweep_from[1]:,}")
+    return crawl(limit, sleep, budget, env, run_dir, known, state, bouts, sweep_from=sweep_from)
+
+
+def sweep_id_floor(env: str, since: str) -> int:
+    """Ids are assigned when an event is created, usually weeks before it happens: the
+    lowest id of events dated in the month before `since`, less one sub-sitemap. An
+    event announced longer ago than that still arrives through the listing."""
+    cur = snowflake_cursor(env)
+    cur.execute("""select min(payload:event_id::int) from FIGHTGRADE_PROD.LANDING.LND_TAPOLOGY_EVENT_DETAILS
+                   where payload:event_date_index::date between dateadd(day, -30, %s::date) and %s::date""",
+                (since, since))
+    low = cur.fetchone()[0]
+    return max((low or 0) - 4000, 0)
 
 
 def save_queue(lake: Lake, env: str, result: dict) -> None:
