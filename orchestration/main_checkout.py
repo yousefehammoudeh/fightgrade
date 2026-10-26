@@ -1,7 +1,11 @@
-"""A clean checkout of origin/main: the only code PROD is ever built from.
+"""Where a run gets its code: always main, never a working copy.
 
-The prod job never runs your working copy. It fetches origin/main into its own
-directory, hard-resets to it and wipes everything untracked, so what lands in
+On Dagster+ the deployed code location *is* main: every push to main redeploys
+it (`.github/workflows/`), so the dbt project bundled with the package is used
+as-is. Branch deployments carry their PR's code instead and are pointed at DEV.
+
+Locally there is no deploy, so a run fetches origin/main into its own
+directory, hard-resets to it and wipes everything untracked. What lands in
 FIGHTGRADE_PROD is exactly what is merged — no uncommitted edits, no local
 branch, no stale dbt target/ from a previous run.
 """
@@ -9,8 +13,12 @@ import os
 import subprocess
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_DIR.parent
 CHECKOUT = Path(os.environ.get("FIGHTGRADE_MAIN_CHECKOUT", "~/.fightgrade/main")).expanduser()
+
+IN_DAGSTER_PLUS = "DAGSTER_CLOUD_DEPLOYMENT_NAME" in os.environ
+IS_BRANCH_DEPLOYMENT = os.environ.get("DAGSTER_CLOUD_IS_BRANCH_DEPLOYMENT") == "1"
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -28,3 +36,20 @@ def sync_main() -> str:
     _git("reset", "--quiet", "--hard", "origin/main", cwd=CHECKOUT)
     _git("clean", "--quiet", "-fdx", cwd=CHECKOUT)
     return _git("rev-parse", "HEAD", cwd=CHECKOUT)
+
+
+def bundled_dbt_project() -> Path:
+    # Installed from the wheel, pyproject.toml force-includes dbt/ here; run
+    # from source, it is still at the repo root.
+    for candidate in (PACKAGE_DIR / "dbt_project", REPO_ROOT / "dbt"):
+        if (candidate / "dbt_project.yml").exists():
+            return candidate
+    raise FileNotFoundError("no dbt project bundled with this code location")
+
+
+def main_dbt_project() -> tuple[Path, str]:
+    """The dbt project to run, and the commit (or deploy) it came from."""
+    if IN_DAGSTER_PLUS:
+        return bundled_dbt_project(), os.environ.get("DAGSTER_CLOUD_GIT_SHA", "deployed main")
+    sha = sync_main()
+    return CHECKOUT / "dbt", sha

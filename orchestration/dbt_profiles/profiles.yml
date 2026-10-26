@@ -1,0 +1,33 @@
+# The dbt profile Dagster+ runs with. No secrets in here: every credential is a
+# Dagster+ deployment environment variable.
+#
+#   SNOWFLAKE_ACCOUNT          ORGNAME-ACCOUNTNAME
+#   DBT_DEV_SVC_PRIVATE_KEY    the key, one line of base64 (the .p8 without its
+#   DBT_PROD_SVC_PRIVATE_KEY   BEGIN/END lines). PROD's is scoped to the full
+#                              deployment only, so branch deployments can't
+#                              authenticate as DBT_PROD_SVC even by mistake.
+#
+# Locally, dbt uses ~/.dbt/profiles.yml (see dbt/profiles.example.yml).
+fightgrade:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: DBT_DEV_SVC
+      private_key: "{{ env_var('DBT_DEV_SVC_PRIVATE_KEY', '') }}"
+      role: FIGHTGRADE_TRANSFORMER_DEV
+      warehouse: FIGHTGRADE_WH
+      database: FIGHTGRADE_DEV
+      schema: STAGING
+      threads: 4
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: DBT_PROD_SVC
+      private_key: "{{ env_var('DBT_PROD_SVC_PRIVATE_KEY', '') }}"
+      role: FIGHTGRADE_TRANSFORMER_PROD
+      warehouse: FIGHTGRADE_WH
+      database: FIGHTGRADE_PROD
+      schema: STAGING
+      threads: 4

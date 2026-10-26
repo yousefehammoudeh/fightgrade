@@ -30,6 +30,7 @@ combat_sports_title_lineages.txt
 *.pem
 *.p8
 profiles.yml
+!orchestration/dbt_profiles/profiles.yml
 
 # ─── dbt / Dagster ──────────────────────────────────────────────────
 target/

@@ -1,0 +1,41 @@
+[project]
+name = "fightgrade"
+version = "0.1.0"
+description = "MMA data platform: Tapology lake, Snowflake warehouse, dbt and Dagster."
+requires-python = ">=3.13,<3.14"
+# What the Dagster+ code location installs. Local-only tools are in the dev group.
+dependencies = [
+    "dagster==1.13.26",
+    "dagster-cloud==1.13.26",
+    "dbt-core==1.12.6",
+    "dbt-snowflake==1.12.4",
+]
+
+[dependency-groups]
+dev = [
+    "dagster-webserver==1.13.26",
+    "dagster-dg-cli==1.13.26",
+    "duckdb==2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orchestration"]
+
+# Ship the dbt project inside the package, so the deployed code location
+# carries exactly the dbt models of the commit it was built from.
+[tool.hatch.build.targets.wheel.force-include]
+"dbt/dbt_project.yml" = "orchestration/dbt_project/dbt_project.yml"
+"dbt/models" = "orchestration/dbt_project/models"
+"dbt/macros" = "orchestration/dbt_project/macros"
+"pyproject.toml" = "pyproject.toml"
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "orchestration"
+code_location_target_module = "orchestration"
