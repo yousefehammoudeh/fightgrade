@@ -1,0 +1,53 @@
+# ─── Data (≈15 GB — never in git) ───────────────────────────────────
+data/
+_s3stage/
+_parsedstage/
+logs/
+outputs/
+graph/
+samples/
+viewer/data/
+analysis/out/
+*.jsonl
+*.parquet
+*.csv
+*.bak
+*.gz
+# research notes, becoming a table
+combat_sports_title_lineages.txt
+
+# ─── Terraform ──────────────────────────────────────────────────────
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+# .terraform.lock.hcl is committed: it pins the exact provider versions.
+
+# ─── Secrets ────────────────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.p8
+profiles.yml
+
+# ─── dbt / Dagster ──────────────────────────────────────────────────
+target/
+dbt_packages/
+.dbt/
+*.duckdb
+*.duckdb.wal
+.dagster/
+dagster_home/
+
+# ─── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── macOS ──────────────────────────────────────────────────────────
+.DS_Store

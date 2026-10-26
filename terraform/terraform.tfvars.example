@@ -1,0 +1,9 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is gitignored)
+project_id = "your-project-id"
+# bucket_name = "fightgrade-lake-<suffix>"   # if fightgrade-lake is taken
+
+# Snowflake — from SELECT CURRENT_ORGANIZATION_NAME(), CURRENT_ACCOUNT_NAME(), CURRENT_USER();
+snowflake_organization_name = "ABCDEFG"
+snowflake_account_name      = "XY12345"
+snowflake_user_name         = "YOUR_LOGIN"
+# snowflake_private_key_path = "~/.snowflake/keys/terraform_svc.p8"
