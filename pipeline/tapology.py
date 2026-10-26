@@ -58,8 +58,10 @@ TABLES = ("event_details", "bouts", "event_fighters", "bout_details")
 EVENT_LINK = re.compile(r"/fightcenter/events/(\d+-[A-Za-z0-9-]+)")
 # qa() codes that mean a page did not parse into a usable record. Everything else
 # it reports (counts_disagree, no_promotion, ...) is a known property of real
-# Tapology data and is surfaced as a warning.
-FATAL_QA = {"parse_failed", "bout_not_two_fighters", "fighter_without_slug"}
+# Tapology data and is surfaced as a warning. That includes fighter_without_slug:
+# Tapology lists some fighters with no profile page (fighter_linked: false), and
+# the bulk archive holds 882 such bouts.
+FATAL_QA = {"parse_failed", "bout_not_two_fighters"}
 BACKOFF = (15, 45)          # seconds, for a soft failure (503, unavailable page)
 # Pacing. The archive's "1.0 s floor" was measured in August with VPN rotation
 # spreading load across IPs. On 2026-10-26, from one IP, ~13 requests at ~1.3 s
