@@ -700,7 +700,22 @@ column on the training table, so new fights never reshuffle old ones.
 
 r = 0 is the average-judge model; stage B earns its place only by beating it. **Selection:**
 mean held-out log loss over the five folds, then the one-standard-error rule: the simplest
-configuration within one SE of the best wins.
+configuration within one SE of the best wins (fewest parameters, then strongest shrinkage).
+**The SE is paired by fold** (`ml/judge_lens/select.py`): every setting is scored on the same
+folds, and the folds differ from each other far more than the settings do. Unpaired, stage A's SE
+was ±0.0066 and put 72 of 81 settings within it; paired, 10.
+
+**Chosen 2026-10-27** (cross-validation on 2010–22; experiments `JUDGE_LENS_STAGE_A` and `_B` in
+`FIGHTGRADE_DEV.ML`):
+
+| Stage | Choice | Why |
+|---|---|---|
+| A | 3 knots, no interactions, era pre/post-2017, L2 10 | Knots are worth most (0.4848 → 0.4797), era buckets next; the best (gates, three eras) is +0.0008 ± 0.0008 away |
+| B | rank 2, M_z 800, M_108 1600 | Against the average judge: named judges −0.0019 ± 0.0006, overall −0.0017 ± 0.0006, 10-8 −0.0015 ± 0.0005. M_z 400–800 is an interior optimum; M_108 is flat, so the strongest shrinkage |
+| B | no gates | Run on both bases, since a term the average judge ignores could still matter to one judge; the gates' best (rank 4) is within one SE of no gates |
+
+Judge styles earn their place, by a small margin: about 0.4% of log loss, 10-8 PR-AUC 0.445 →
+0.462. Stage C (M_FAN), the forward check and the locked test are still to run.
 
 **Measured on every run, on held-out predictions only:**
 - **Overall:** log loss (selects), Brier, calibration error and a reliability curve for P(won

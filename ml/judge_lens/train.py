@@ -28,6 +28,7 @@ DEFAULTS = {"knots": 0, "interactions": "gates", "era": "rules2017", "l2_beta": 
 TEST_FIGHTS = {"13677": "Pimblett def. Gordon", "13556": "O'Malley def. Yan", "15938": "Garbrandt def. Xiao Long"}
 NAMED_MIN_ROUNDS = 300      # the named judges: this many usable rounds in 2010-24
 FEW_ROUNDS = 100            # judges below this are reported apart
+SE_METRICS = ["log_loss", "log_loss_named", "log_loss_10_8", "crowd_log_loss"]   # what each stage selects on
 
 
 def add_flags(df: pd.DataFrame) -> pd.DataFrame:
@@ -78,16 +79,21 @@ def splits(df: pd.DataFrame, mode: str):
 def run(df: pd.DataFrame, params: dict, mode: str) -> tuple[dict, pd.DataFrame]:
     """Held-out metrics for one setting, and the test fights it could score."""
     p = {**DEFAULTS, **params}
-    held, probs, avg, fold_ll = [], [], [], []
+    held, probs, avg, folds = [], [], [], []
     for train, test in splits(df, mode):
         basis, model = fit(train, p)
         P = predict(basis, model, test)
         held.append(test); probs.append(P); avg.append(predict(basis, model, test, as_average=True))
-        fold_ll.append(evaluate(P, test)["log_loss"])
+        folds.append(evaluate(P, test))
     held_df, P = pd.concat(held), np.vstack(probs)
     metrics = evaluate(P, held_df)
-    if len(fold_ll) > 1:
-        metrics["log_loss_fold_se"] = float(np.std(fold_ll, ddof=1) / np.sqrt(len(fold_ll)))
+    if len(folds) > 1:
+        # every setting is scored on the same folds, so the one-SE rule compares
+        # settings fold by fold (select.py); the plain spread is kept for reference
+        for key in SE_METRICS:
+            vals = [f.get(key, float("nan")) for f in folds]
+            metrics[f"{key}_fold_se"] = float(np.nanstd(vals, ddof=1) / np.sqrt(len(vals)))
+            metrics.update({f"{key}_fold{k}": v for k, v in enumerate(vals)})
     metrics["n_params_per_judge"] = float(p["rank"] + 1)
     return metrics, test_fights(held_df, P, np.vstack(avg))
 
