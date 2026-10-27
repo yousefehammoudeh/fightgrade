@@ -96,10 +96,22 @@ class Browser:
             user_data_dir=self.profile, channel="chrome", headless=False, args=args, env=dict(os.environ),
             viewport={"width": 1280, "height": 900}, locale="en-US")
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
-        self.pace()
-        self.page.goto(INDEX.format(date.today().year), wait_until="domcontentloaded", timeout=60000)
-        html = self.page.content()
-        return html if PAGE_MARK in html else None
+        url = INDEX.format(date.today().year)
+        for attempt in range(len(BACKOFF) + 1):
+            self.pace()
+            try:
+                resp = self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                status = resp.status if resp else None
+            except Exception as ex:          # an error status with no body: Chrome raises instead
+                status = f"{type(ex).__name__}: {str(ex).splitlines()[0][:120]}"
+            if status == 200 and PAGE_MARK in self.page.content():
+                return self.page.content()
+            if status in RATE_LIMITED:
+                raise Stop(f"rate limited ({status}) on the event index")
+            log(f"  event index: {status}" + (f" -> wait {BACKOFF[attempt]}s" if attempt < len(BACKOFF) else ""))
+            if attempt < len(BACKOFF):
+                time.sleep(BACKOFF[attempt])
+        return None
 
     def pace(self) -> None:
         self.budget.take()
