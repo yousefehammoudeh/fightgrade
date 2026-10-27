@@ -188,3 +188,24 @@ resource "snowflake_grant_privileges_to_account_role" "reader_future" {
     }
   }
 }
+
+# ─── ML ──────────────────────────────────────────────────────────────
+# The judge model's Model Registry entries and Snowflake Experiments
+# (DESIGN.md §8), one ML schema per environment. Not a dbt layer: what lives
+# here is created by the training job, so the transformer gets the ML object
+# privileges rather than dbt's table and view ones. CREATE STAGE is for the
+# registry's upload of the model's files.
+resource "snowflake_schema" "ml" {
+  for_each = toset(local.envs)
+  database = snowflake_database.env[each.key].name
+  name     = "ML"
+}
+
+resource "snowflake_grant_privileges_to_account_role" "transformer_ml" {
+  for_each          = toset(local.envs)
+  account_role_name = snowflake_account_role.transformer[each.key].name
+  privileges        = ["USAGE", "CREATE MODEL", "CREATE EXPERIMENT", "CREATE STAGE", "CREATE TABLE"]
+  on_schema {
+    schema_name = snowflake_schema.ml[each.key].fully_qualified_name
+  }
+}
