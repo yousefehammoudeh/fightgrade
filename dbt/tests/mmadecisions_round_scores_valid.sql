@@ -27,4 +27,4 @@ rounds as (
 select *
 from rounds
 where (score_1 is null) <> (score_2 is null)
-   or (s1 is not null and (greatest(s1, s2) <> 10 or least(s1, s2) < 7))
+   or (s1 is not null and not {{ valid_round_score('s1', 's2') }})

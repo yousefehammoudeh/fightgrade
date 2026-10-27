@@ -24,3 +24,9 @@ end
 {% macro mmadecisions_is_draw(token) -%}
 upper({{ token }}) = 'DRAW'
 {%- endmacro %}
+
+{# A round score a judge can give, once deductions are added back: the winner
+   on 10, the loser on 7-10 (10-10 an even round). #}
+{% macro valid_round_score(a, b) -%}
+(greatest({{ a }}, {{ b }}) = 10 and least({{ a }}, {{ b }}) >= 7)
+{%- endmacro %}
