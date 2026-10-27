@@ -1,0 +1,9 @@
+# The Judge Lens training code, run locally against DEV (ml/judge_lens).
+# Pinned to the builds ML.TRAIN_JUDGE_LENS gets from Snowflake (deploy.py
+# PACKAGES), so a laptop run and a procedure run fit the same model.
+#   .venv/bin/pip install -r ml/requirements.txt
+pandas==2.3.3
+snowflake-ml-python==2.6.0   # Experiments and the registry; needs pandas < 3
+numpy==2.5.4
+scipy==1.18.1
+scikit-learn==1.9.1

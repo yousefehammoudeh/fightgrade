@@ -14,6 +14,10 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    crawl, or one launched by hand), by the resync_dev sensor.
                    Zero-copy clones, so it takes seconds; it drops DEV-only
                    tables, so unmerged DEV work lasts until the next build.
+  judge_lens_train the judge model, after every successful PROD build, by the
+                   judge_lens_after_build sensor (orchestration/judge_lens.py):
+                   log the default version's predictions for new rounds, then
+                   retrain and register a version when there are new rounds.
   tapology_crawl   newly completed Tapology events -> lake -> LANDING
                    (orchestration/tapology.py). Daily at 02:00, Tapology's
                    quiet hour: its audience is ~41% US, then the UK and central
@@ -68,6 +72,7 @@ from dagster import (
 from .dbt_cli import run_dbt
 from .main_checkout import IN_DAGSTER_PLUS, IS_BRANCH_DEPLOYMENT, main_dbt_project
 from .tapology import RETRY_ON_ANOTHER_IP, tapology_crawl
+from .judge_lens import judge_lens_train
 from .mmadecisions import mmadecisions_crawl
 from .ufcstats import ufcstats_crawl
 
@@ -136,6 +141,14 @@ def resync_dev(context: RunStatusSensorContext) -> RunRequest:
     return RunRequest(run_key=context.dagster_run.run_id)
 
 
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS, monitored_jobs=[dbt_prod_build],
+                   request_job=judge_lens_train, default_status=SENSOR_STATUS)
+def judge_lens_after_build(context: RunStatusSensorContext) -> RunRequest:
+    """The judge model's log and retrain once a PROD build has refreshed the REFINED
+    facts; one per build. Most builds bring no new decisions, and then it only logs."""
+    return RunRequest(run_key=context.dagster_run.run_id)
+
+
 CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl]
 IP_RETRY_TAG = "fightgrade/ip_retry"
 # With one refused IP in three, four misses in a row is about one night in 80.
@@ -192,7 +205,7 @@ def build_after_crawl(context: SensorEvaluationContext):
 
 
 defs = Definitions(
-    jobs=[dbt_prod_build, dbt_resync_dev, *CRAWLS],
+    jobs=[dbt_prod_build, dbt_resync_dev, judge_lens_train, *CRAWLS],
     schedules=[
         ScheduleDefinition(
             job=tapology_crawl,
@@ -213,5 +226,5 @@ defs = Definitions(
             default_status=SCHEDULE_STATUS,
         ),
     ],
-    sensors=[resync_dev, crawl_retry, build_after_crawl],
+    sensors=[resync_dev, judge_lens_after_build, crawl_retry, build_after_crawl],
 )
