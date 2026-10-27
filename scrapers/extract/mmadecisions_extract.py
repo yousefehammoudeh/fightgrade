@@ -80,7 +80,8 @@ def parse_event_decisions(html: str) -> list[dict]:
 # Old and partial cards: an unnamed judge is "Unknown Judge" with no id; a round
 # not known is "-" (None); on early cards the TOTAL is a legend code, not a
 # score: 0-0 = unknown, 1-0 = the judge favoured a fighter, score unknown,
-# 1-1 = the judge had it a draw. totals_kind says which.
+# 1-1 = the judge had it a draw. totals_kind says which; a legend card's
+# round rows carry the code too, so their scores are None.
 
 LOGO = re.compile(r"resources/img/([A-Za-z0-9_-]+?)_small\.png")
 DEDUCTION = re.compile(r"(.+?) was deducted (\d+) points? in round (\d+):?\s*(.*)", re.I)
@@ -163,20 +164,26 @@ def parse_decision(html: str, decision_id: str) -> dict:
         table = cell.find_parent("table")
         judge_id, judge_name = entity_link(cell.find("a"), "judge")
         judge_name = judge_name or clean(cell.get_text()) or None
-        known = []
+        card = []
         for tr in table.select("tr.decision"):
             tds = [clean(td.get_text()) for td in tr.find_all("td", recursive=False)]
             if len(tds) == 3 and tds[0].isdigit():
-                s1, s2 = to_int(tds[1]), to_int(tds[2])
-                known.append(s1 is not None)
-                rounds.append({"decision_id": decision_id, "judge_slot": slot, "judge_id": judge_id,
-                               "judge_name": judge_name, "round": int(tds[0]), "score_1": s1, "score_2": s2})
+                card.append({"decision_id": decision_id, "judge_slot": slot, "judge_id": judge_id,
+                             "judge_name": judge_name, "round": int(tds[0]),
+                             "score_1": to_int(tds[1]), "score_2": to_int(tds[2])})
         tot = [to_int(td.get_text()) for td in table.select("tr.bottom-row td.bottom-cell")]
         t1, t2 = (tot + [None, None])[:2]
-        kind = ("score" if any(known) or max(t1 or 0, t2 or 0) > 1 else "legend")
+        # A point score is never below 7, so a card whose every number is 0 or 1 is
+        # the legend's code, its round rows too ("1 -" = favoured): not round scores.
+        numbers = [v for r in card for v in (r["score_1"], r["score_2"])] + [t1, t2]
+        kind = "score" if max((v for v in numbers if v is not None), default=0) > 1 else "legend"
+        if kind == "legend":
+            for r in card:
+                r["score_1"] = r["score_2"] = None
+        rounds += card
         totals.append({"decision_id": decision_id, "judge_slot": slot, "judge_id": judge_id, "judge_name": judge_name,
-                       "total_1": t1, "total_2": t2, "totals_kind": kind, "rounds_known": sum(known),
-                       "rounds_listed": len(known)})
+                       "total_1": t1, "total_2": t2, "totals_kind": kind,
+                       "rounds_known": sum(r["score_1"] is not None for r in card), "rounds_listed": len(card)})
 
     media = []
     head_cell = next((td for td in s.select("td.top-cell") if "MEDIA SCORES" in td.get_text()), None)
@@ -223,7 +230,8 @@ def parse_decision(html: str, decision_id: str) -> dict:
         submitted = to_int(sub.find("b").get_text())
     pie = PIE.search(html)
     if pie:
-        winner_counts = {clean(k): int(v) for k, v in re.findall(r"\[\s*'([^']*)'\s*,\s*(\d+)\s*\]", pie.group(1))}
+        # The page does not escape apostrophes in names: ['O'Malley', 1730]
+        winner_counts = {clean(k): int(v) for k, v in re.findall(r"\[\s*'([^\[\]]*?)'\s*,\s*(\d+)\s*\]", pie.group(1))}
     for row in fan:
         row["est_count"] = round(row["pct"] * submitted / 100) if row["pct"] is not None and submitted else None
 
