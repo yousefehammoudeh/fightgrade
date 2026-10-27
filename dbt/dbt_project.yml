@@ -20,3 +20,9 @@ models:
       +schema: LANDING
       +materialized: incremental
       +incremental_strategy: append
+    # CLEANSING is hygiene only: typed, deduplicated to the newest fetch, blanks
+    # to NULL, and only the columns something downstream reads. Every row stays —
+    # all sports, all levels; scope is applied in REFINED (DESIGN.md §5).
+    cleansing:
+      +schema: CLEANSING
+      +materialized: table

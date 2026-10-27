@@ -1,0 +1,72 @@
+version: 2
+
+# MMADecisions, cleansed. Fighters are in page order: the winner first, or as
+# listed for a draw. Every (score_1, score_2) pair is (fighter 1, fighter 2).
+# Winners given by surname are resolved to a side: 1, 2, or NULL for a draw or
+# when both fighters share the surname.
+models:
+  - name: cln_mmadecisions_events
+    description: One row per event.
+    columns:
+      - name: mmadecisions_event_id
+        data_tests: [unique, not_null]
+      - name: event_date
+        data_tests: [not_null]
+
+  - name: cln_mmadecisions_decisions
+    description: One row per decision, with the tale of the tape and fans' winner votes per side.
+    columns:
+      - name: decision_id
+        data_tests: [unique, not_null]
+      - name: mmadecisions_event_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('cln_mmadecisions_events'), field: mmadecisions_event_id}}
+      - name: fighter_1_name
+        data_tests: [not_null]
+      - name: fighter_2_name
+        data_tests: [not_null]
+
+  - name: cln_mmadecisions_judge_rounds
+    description: One row per judge per round. judge_id and judge_name are NULL for an unknown judge; a score is NULL where the site shows "-".
+    data_tests:
+      - unique_columns: {arguments: {columns: [decision_id, judge_slot, round]}}
+    columns:
+      - name: decision_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+
+  - name: cln_mmadecisions_judge_totals
+    description: One row per judge per decision.
+    data_tests:
+      - unique_columns: {arguments: {columns: [decision_id, judge_slot]}}
+    columns:
+      - name: decision_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+      - name: totals_kind
+        data_tests:
+          - accepted_values: {arguments: {values: [score, legend]}}
+
+  - name: cln_mmadecisions_deductions
+    description: One row per point deduction; fighter_side resolved from the surname.
+    data_tests:
+      - unique_columns: {arguments: {columns: [decision_id, deduction_slot]}}
+
+  - name: cln_mmadecisions_media_scores
+    description: >
+      One row per media scorecard as listed. The page has no order or id for them,
+      and a handful are listed twice; those stay, as the page has them.
+    columns:
+      - name: decision_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+
+  - name: cln_mmadecisions_fan_scores
+    description: Fan scorecard shares per round and for the fight. score_hi/score_lo are the outcome's winner's and loser's points.
+    columns:
+      - name: scope
+        data_tests:
+          - accepted_values: {arguments: {values: [round, total]}}
+      - name: share
+        data_tests: [not_null]

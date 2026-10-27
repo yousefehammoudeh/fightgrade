@@ -1,0 +1,85 @@
+version: 2
+
+# Tapology, cleansed. Every status, sport and level stays: scope is REFINED's.
+# Child rows (bouts, fighters, referees, weigh-ins, cancelled bouts) come from
+# the newest fetch of their event page. Keys are slugs (event_slug, bout_slug,
+# fighter_slug), whole strings, never the leading number alone.
+models:
+  - name: cln_tapology_events
+    description: The event index (2026-08 bulk load), one row per listed event.
+    columns:
+      - name: event_slug
+        data_tests: [unique, not_null]
+
+  - name: cln_tapology_event_details
+    description: One row per event page.
+    columns:
+      - name: event_slug
+        data_tests: [unique, not_null]
+      - name: status
+        data_tests:
+          - accepted_values: {arguments: {values: [Completed, Upcoming, In Progress, Rumored Upcoming]}}
+      - name: date_precision
+        data_tests:
+          - accepted_values: {arguments: {values: [full, assumed_year, from_page]}}
+
+  - name: cln_tapology_bouts
+    description: One row per bout on a card.
+    columns:
+      - name: bout_slug
+        data_tests: [unique, not_null]
+      - name: event_slug
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('cln_tapology_event_details'), field: event_slug}}
+      - name: level
+        data_tests:
+          - accepted_values: {arguments: {values: [Professional, Amateur, Juniors, Kids]}}
+
+  - name: cln_tapology_bout_fighters
+    description: One row per fighter per bout, side 0 and 1, with the tale of the tape at that bout.
+    data_tests:
+      - unique_columns: {arguments: {columns: [bout_slug, side]}}
+    columns:
+      - name: bout_slug
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_tapology_bouts'), field: bout_slug}}
+
+  - name: cln_tapology_event_fighters
+    description: >
+      One row per fighter per bout, cancelled and fizzled bouts included. The grain
+      includes side: one page links both sides of a bout to the same fighter.
+    data_tests:
+      - unique_columns: {arguments: {columns: [bout_slug, fighter_slug, side]}}
+    columns:
+      - name: fighter_slug
+        data_tests: [not_null]
+
+  - name: cln_tapology_bout_details
+    description: One row per title-bout page.
+    columns:
+      - name: bout_slug
+        data_tests: [unique, not_null]
+
+  - name: cln_tapology_promotions
+    description: One row per promotion.
+    columns:
+      - name: promotion_id
+        data_tests: [unique, not_null]
+
+  - name: cln_tapology_bout_referees
+    description: One row per bout the event page names a referee slot for; referee NULL when blank.
+    columns:
+      - name: bout_slug
+        data_tests: [not_null]
+
+  - name: cln_tapology_weigh_ins
+    description: One row per weigh-in pairing on an event page.
+    data_tests:
+      - unique_columns: {arguments: {columns: [event_slug, weigh_in_slot]}}
+
+  - name: cln_tapology_cancelled_bouts
+    description: One row per bout an event page lists as cancelled.
+    columns:
+      - name: bout_slug
+        data_tests: [not_null]
