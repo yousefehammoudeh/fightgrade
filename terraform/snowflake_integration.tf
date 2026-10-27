@@ -14,7 +14,7 @@
 #
 # The bucket is split the same way Snowflake is. PROD reads the top-level
 # parsed/ zone; DEV reads dev/parsed/, where local and branch-deployment crawls
-# write. A test crawl therefore can never reach PROD's 03:00 build.
+# write. A test crawl therefore can never reach PROD's build.
 # ─────────────────────────────────────────────────────────────────────
 
 locals {

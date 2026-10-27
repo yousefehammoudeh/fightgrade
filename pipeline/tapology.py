@@ -79,7 +79,7 @@ MAX_RECLEARS = 2            # per run; past that, stop rather than push
 # included. A peak Saturday is ~268 pages. What a run cannot fetch waits in the
 # queue for the next one. A backfill also keeps a per-IP daily ledger (ip_budget).
 DAILY_BUDGET = 450
-MAX_FETCH_MINUTES = 30      # stop fetching by then, so LANDING loads before the 03:00 build
+MAX_FETCH_MINUTES = 30      # stop fetching by then: the run, and the PROD build after it, end by ~02:40
 RATE_LIMITED = (429, 503)   # per-IP: waiting does nothing (HANDOFF.md §8), so stop and defer
 MAX_TRIES = 7               # days an event may stay unfinished in the queue before it is dropped
 DISCOVERY_SHARE = 3         # discovery may spend at most 1/3 of a run's budget
@@ -907,7 +907,7 @@ def main() -> int:
     ap.add_argument("--max-requests", type=int, default=DAILY_BUDGET,
                     help=f"requests this run may spend (default {DAILY_BUDGET})")
     ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES,
-                    help=f"stop fetching after this many minutes (default {MAX_FETCH_MINUTES}, for the 03:00 build)")
+                    help=f"stop fetching after this many minutes (default {MAX_FETCH_MINUTES})")
     ap.add_argument("--dry-run", action="store_true", help="crawl and stage locally; upload and load nothing")
     ap.add_argument("--from-run", metavar="RUN_ID",
                     help="re-parse that run's archived pages instead of crawling (no network to Tapology)")
