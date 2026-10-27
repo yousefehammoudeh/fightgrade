@@ -38,3 +38,60 @@ models:
     columns:
       - name: promotion_logo
         data_tests: [unique]
+
+  - name: fct_ufc_round_stats
+    description: >
+      One row per fighter per round of every UFC Stats fight: the judge model's
+      features (DESIGN.md §8). The counts of cln_ufcstats_fight_rounds, with the
+      fight's context, the opponent, round_seconds (the scheduled length, or less for
+      the round a finish ended) and non_sig_str_landed (total less significant).
+      ctrl_tracked is per fight: UFC Stats prints '--' for control on a whole fight it
+      did not track and 0:00 for none, so a NULL ctrl_seconds is never zero.
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_fight_id, round, ufcstats_fighter_id]}}
+    columns:
+      - name: ufcstats_fight_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: ufcstats_fighter_id
+        data_tests: [not_null]
+      - name: ctrl_tracked
+        data_tests: [not_null]
+
+  - name: fct_judge_round_score
+    description: >
+      One row per rater per round of every decision matched to a UFC Stats fight: the
+      judge model's target (DESIGN.md §8). A rater is a judge, a hard call, or the
+      crowd, the fans' round scores as a distribution weighted by label_weight (the
+      fans counted). Fighter A and B are the fight's UFC Stats fighters ordered by id,
+      which says nothing about the result. The label is the round score before
+      deductions, which MMADecisions' scores include: p_7_10 .. p_10_7 are it as a
+      distribution over the seven scores from A's side, margin is A's points less B's
+      for judges. exclusion_reason is NULL for a row the model may train on. period
+      (select < 2023, forward 2023-24, test 2025+) and cv_fold (0-4, a hash of the
+      event id) are the protocol's split, by event.
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_fight_id, round, rater_key]}}
+    columns:
+      - name: ufcstats_fight_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: decision_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('xref_decision_ufcstats_fight'), field: decision_id}}
+      - name: rater_kind
+        data_tests:
+          - accepted_values: {arguments: {values: [judge, crowd]}}
+      - name: exclusion_reason
+        data_tests:
+          - accepted_values:
+              arguments: {values: [legend_card, quarantined, no_score, invalid_score, no_stats, no_control]}
+      - name: period
+        data_tests:
+          - accepted_values: {arguments: {values: [select, forward, test]}}
+      - name: cv_fold
+        data_tests:
+          - accepted_values: {arguments: {values: [0, 1, 2, 3, 4]}}
