@@ -12,6 +12,8 @@ analysis/out/
 *.jsonl
 *.parquet
 *.csv
+# dbt seeds are hand-curated inputs, kept in git
+!dbt/seeds/*.csv
 *.bak
 *.gz
 # research notes, becoming a table
