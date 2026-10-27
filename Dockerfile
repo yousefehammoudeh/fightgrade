@@ -1,5 +1,5 @@
 # The Dagster+ Serverless image. A Docker build (not the fast PEX deploy)
-# because the Tapology crawler needs system packages: Google Chrome, its
+# because the Tapology and UFC Stats crawlers need system packages: Google Chrome, its
 # libraries, and Xvfb for the virtual display headed Chrome draws into.
 #
 # The project is installed editable from /app, so the code sees the repo's own
@@ -21,4 +21,4 @@ RUN pip install -e /app
 # drives it, so the two versions always match.
 RUN python -m playwright install --with-deps chrome
 
-RUN dagster-cloud --version && Xvfb -help >/dev/null 2>&1 && python -c "import pipeline.tapology"
+RUN dagster-cloud --version && Xvfb -help >/dev/null 2>&1 && python -c "import pipeline.tapology, pipeline.ufcstats"

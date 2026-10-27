@@ -44,3 +44,26 @@ models:
   - name: lnd_tapology_promotion_details
     description: Promotion pages (headquarters, acronyms, links).
     columns: *landing_columns
+  # UFC Stats (pipeline/ufcstats.py). Column names follow the 2026-02/03 export;
+  # red/blue_fighter_id are the fight page's first and second fighter, not corners.
+  - name: lnd_ufcstats_events
+    description: Event pages, one row per completed event, with its card (fight ids, result flags, bonuses).
+    columns: *landing_columns
+  - name: lnd_ufcstats_fights
+    description: Fight pages, one row per fight. Method, details, referee, time format and judges' scores.
+    columns: *landing_columns
+  - name: lnd_ufcstats_fight_totals
+    description: Whole-fight totals, one row per fighter per fight.
+    columns: *landing_columns
+  - name: lnd_ufcstats_fight_rounds
+    description: Per-round totals, one row per fighter per round.
+    columns: *landing_columns
+  - name: lnd_ufcstats_sig_strikes_by_target
+    description: Significant strikes by head/body/leg, per fighter, for round 'totals' and each round.
+    columns: *landing_columns
+  - name: lnd_ufcstats_sig_strikes_by_position
+    description: Significant strikes at distance/clinch/ground, per fighter, for round 'totals' and each round.
+    columns: *landing_columns
+  - name: lnd_ufcstats_fighters
+    description: Fighter pages, refreshed whenever the fighter is on a crawled card.
+    columns: *landing_columns
