@@ -67,3 +67,23 @@ models:
   - name: lnd_ufcstats_fighters
     description: Fighter pages, refreshed whenever the fighter is on a crawled card.
     columns: *landing_columns
+  # MMADecisions (pipeline/mmadecisions.py). Fighters are in page order, winner
+  # first (or as listed for a draw); every score pair is (fighter 1, fighter 2).
+  - name: lnd_mmadecisions_events
+    description: Event pages, one row per event, with each decision's method and the judges' totals as listed.
+    columns: *landing_columns
+  - name: lnd_mmadecisions_decisions
+    description: Decision pages, one row per decision. Event, fighters, result, method, referee, deductions, tale of the tape, fan submissions and fan winner counts.
+    columns: *landing_columns
+  - name: lnd_mmadecisions_judge_rounds
+    description: One row per judge per round. judge_id is null for "Unknown Judge"; a score is null where the site shows "-".
+    columns: *landing_columns
+  - name: lnd_mmadecisions_judge_totals
+    description: One row per judge. totals_kind 'legend' marks early cards whose TOTAL is a code (0-0 unknown, 1-0 favoured, 1-1 draw), not a score.
+    columns: *landing_columns
+  - name: lnd_mmadecisions_media_scores
+    description: One row per media score. Writer, outlet, score, who they had winning, source link.
+    columns: *landing_columns
+  - name: lnd_mmadecisions_fan_scores
+    description: The fan scores the page lists (top finals and top 3 per round), as %, with est_count = % x submissions.
+    columns: *landing_columns
