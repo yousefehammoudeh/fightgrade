@@ -8,13 +8,17 @@ never races the other crawlers' LANDING loads. Headed Chrome, like the other
 crawlers; requests at least 2.5 s apart per IP, MMADecisions' terms.
 
 All of it (~9,300 pages) runs as parallel shards, the tapology_crawl drill, one
-per egress IP (a run that lands on an IP another run holds stops before its
-first request; MMADecisions refuses 34.216.9.66, where a run stops cleanly):
+per egress IP:
 
     1. backfill_plan=true                   plan: every event on the 32 year pages
     2. backfill_shard=k, backfill_shards=N  for each k, in parallel: fetch and upload
     3. backfill_plan=true again             completeness: events_to_fetch should be 0
     4. replay=true                          parse every archived page, load LANDING once
+
+A run that lands on an IP another run holds, or on 34.216.9.66, which
+MMADecisions refuses, fails before fetching anything, and the crawl_retry
+sensor launches it again, usually onto another IP. That goes for the weekly
+Sunday 02:00 run too.
 
 replay=true re-parses the latest copy of every archived page from the bucket
 with no requests to MMADecisions: a parser change is replayed, never re-crawled.
@@ -28,13 +32,13 @@ from pipeline.lake import Lake, environment, new_run_id, zone
 
 from .dbt_cli import run_dbt
 from .main_checkout import dbt_project_for
-from .tapology import crawler_log_to
+from .tapology import RETRY_ON_ANOTHER_IP, crawler_log_to, fail_if_nothing_fetched
 
 
 class MmaDecisionsCrawlConfig(Config):
     limit: int = 0                             # events to archive; 0 = no cap
-    max_requests: int = mmad.DAILY_BUDGET      # requests this run may spend, within today's budget for the IP
-    daily_budget: int = mmad.DAILY_BUDGET      # the per-IP daily cap; a backfill may raise it
+    max_requests: int = mmad.DAILY_BUDGET      # requests this run may spend
+    daily_budget: int = mmad.DAILY_BUDGET      # a backfill's per-IP daily cap; a daily run has none
     interval: float = mmad.MIN_INTERVAL        # seconds between request starts; mmad.FLOOR_INTERVAL is the floor
     max_minutes: float = mmad.MAX_FETCH_MINUTES
     backfill_plan: bool = False                # write the all-events plan, fetch no events
@@ -58,15 +62,17 @@ def mmadecisions_fetch(context: OpExecutionContext, config: MmaDecisionsCrawlCon
         if config.replay:
             result = mmad.run(env, run_id, lake, None, config.interval, do_replay=True)
         else:
-            with mmad.ip_budget(lake, config.max_requests, config.max_minutes, config.daily_budget) as budget:
+            daily = config.daily_budget if backfill else None
+            with mmad.ip_budget(lake, config.max_requests, config.max_minutes, daily) as budget:
                 if backfill and budget.limit == 0:
-                    raise Failure("no budget on this egress IP (spent today, or another run holds it): "
-                                  "launch this shard again")
+                    raise Failure(f"no budget on this egress IP (spent today, or another run holds it): "
+                                  f"{RETRY_ON_ANOTHER_IP}")
                 result = mmad.run(env, run_id, lake, budget, config.interval, config.limit, config.backfill_plan,
                                   shard, config.backfill_shards)
     if result["stopped"]:
         context.log.warning(result["stopped"])
     context.add_output_metadata({"run_id": run_id, "env": env, **result["report"]})
+    fail_if_nothing_fetched(result)
     return {"env": env, "run_id": run_id, "run_dir": str(mmad.RUNS / run_id), "result": result, "shard": shard,
             "backfill": backfill}
 

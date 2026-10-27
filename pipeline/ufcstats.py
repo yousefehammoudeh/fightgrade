@@ -21,19 +21,18 @@ alone, so the first run fills the gap since that export, not all of history.
 
 An event is all or nothing: if any of its fight pages cannot be fetched, none
 of it is kept and it goes back in the queue. Polite like Tapology: one browser,
-one page at a time at a measured pace (DEFAULT_SLEEP), DAILY_BUDGET requests a day per IP, the run stops on a 429
+one page at a time at a measured pace (DEFAULT_SLEEP), DAILY_BUDGET requests a run, the run stops on a 429
 or 503, and what is left waits in the lake's queue for the next run.
 """
 import argparse, gzip, json, os, shutil, sys, tempfile, time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
 from .lake import Lake, environment, new_run_id, raw_html_key, zone
-from .tapology import (Budget, Stop, egress_ip, parsed_key, roundtrip_mismatches, snowflake_cursor, stage,
-                       virtual_display)
+from .tapology import (Budget, Stop, ip_budget as shared_ip_budget, parsed_key, roundtrip_mismatches,
+                       snowflake_cursor, stage, virtual_display)
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "_crawlruns" / "ufcstats"
@@ -61,14 +60,13 @@ DEFAULT_SLEEP = 1.0
 MIN_SLEEP = 0.5             # the fastest gap measured clean; never go below it
 RECLEAR_WAIT = 60
 MAX_RECLEARS = 2
-DAILY_BUDGET = 1500         # ~30 min at DEFAULT_SLEEP: the whole gap in one night
+DAILY_BUDGET = 1500         # a run's requests, ~30 min at DEFAULT_SLEEP; a backfill's per-IP daily cap too
 MAX_FETCH_MINUTES = 30
 RATE_LIMITED = (429, 503)
 MAX_TRIES = 7
 SETTLE_DAYS = 7             # an event this far past is kept even with a bout lacking a result
 BUDGET_KEY = "state/ufcstats/ip_budget.json"     # its own ledger: a different site from Tapology
 LOCK_PREFIX = "state/ufcstats/ip_lock/"
-LOCK_STALE_HOURS = 3
 LAKE_THREADS = 8            # a backfill shard uploads ~5,600 raw pages; one at a time is ~15 min
 
 JS = r"""
@@ -616,31 +614,10 @@ def backfill_shard(lake: Lake, env: str, run_dir: Path, sleep: float, budget: Bu
                  claim_linked=lambda e: e not in planned and int(e, 16) % shards == shard)
 
 
-@contextmanager
-def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int = DAILY_BUDGET):
-    """Today's remaining UFC Stats requests on this egress IP, with a lock so two runs
-    never share an IP. Same rules as pipeline.tapology.ip_budget, its own ledger."""
-    ip, today = egress_ip(), date.today().isoformat()
-    lock = f"{LOCK_PREFIX}{ip}.json"
-    held = lake.create(lock, {"since": time.time()})
-    if not held and (lake.age_seconds(lock) or 0) > LOCK_STALE_HOURS * 3600:
-        lake.delete(lock)
-        held = lake.create(lock, {"since": time.time()})
-    spent = lake.read_json(BUDGET_KEY, {}).get(ip, {}).get(today, 0)
-    budget = Budget(max(min(max_requests, daily - spent), 0) if held else 0, minutes)
-    log(f"egress IP {ip}: {spent}/{daily} UFC Stats requests spent today, this run may spend {budget.limit}"
-        + ("" if held else " (another run holds this IP)"))
-    try:
-        yield budget
-    finally:
-        if held:
-            ledger = lake.read_json(BUDGET_KEY, {})
-            week_ago = (date.today() - timedelta(days=7)).isoformat()
-            days = {d: n for d, n in ledger.get(ip, {}).items() if d > week_ago}
-            days[today] = days.get(today, 0) + budget.spent
-            ledger[ip] = days
-            lake.write_json(BUDGET_KEY, ledger)
-            lake.delete(lock)
+def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int | None = None):
+    """pipeline.tapology.ip_budget with UFC Stats' own lock and ledger: a daily run spends
+    up to `max_requests`; a backfill passes `daily`, its shards' per-IP cap."""
+    return shared_ip_budget(lake, max_requests, minutes, daily, BUDGET_KEY, LOCK_PREFIX, "UFC Stats")
 
 
 def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
@@ -694,7 +671,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="completed events to keep (0: as many as the budget allows)")
     ap.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help=f"seconds between requests (default {DEFAULT_SLEEP})")
     ap.add_argument("--max-requests", type=int, default=DAILY_BUDGET,
-                    help=f"requests this run may spend, within today's {DAILY_BUDGET} for this IP")
+                    help=f"requests this run may spend (default {DAILY_BUDGET})")
     ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES,
                     help=f"stop fetching after this many minutes (default {MAX_FETCH_MINUTES})")
     ap.add_argument("--since", default=EXPORT_LAST_EVENT,
@@ -704,7 +681,8 @@ def main() -> int:
     ap.add_argument("--backfill-plan", action="store_true", help="write the all-of-UFC-Stats plan; fetch no events")
     ap.add_argument("--backfill-shard", type=int, metavar="K", help="with --backfill-shards: fetch this shard of the plan")
     ap.add_argument("--backfill-shards", type=int, default=0, metavar="N")
-    ap.add_argument("--daily-budget", type=int, default=DAILY_BUDGET, help="the per-IP daily cap; a backfill may raise it")
+    ap.add_argument("--daily-budget", type=int, default=DAILY_BUDGET,
+                    help="a backfill's per-IP daily cap, which it may raise; a daily run has none")
     args = ap.parse_args()
     if args.sleep < MIN_SLEEP:
         ap.error(f"--sleep below {MIN_SLEEP} is faster than anything measured (see DEFAULT_SLEEP)")
@@ -721,7 +699,8 @@ def main() -> int:
         result = rebuild(run_dir, env)
         known -= {e["ufcstats_event_id"] for e in result["rows"]["ufcstats_events"]}
     else:
-        with ip_budget(lake, args.max_requests, args.max_minutes, args.daily_budget) as budget:
+        daily = args.daily_budget if args.backfill_plan or args.backfill_shards else None
+        with ip_budget(lake, args.max_requests, args.max_minutes, daily) as budget:
             if args.backfill_plan:
                 result = plan_backfill(lake, env, args.sleep, budget, known)
             elif args.backfill_shards:
