@@ -20,13 +20,16 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    Europe's morning. Its fetch stops by 02:30, so LANDING is
                    loaded before the 03:00 build publishes it.
   ufcstats_crawl   newly completed UFC Stats events -> lake -> LANDING
-                   (orchestration/ufcstats.py). Weekly, Sunday 02:00: UFC Stats
-                   only follows the UFC, whose cards are on Saturdays. A
-                   different site from Tapology, its own lock and its own
-                   LANDING tables. A UFC card is ~45 requests, ~3 min.
+                   (orchestration/ufcstats.py). Weekly, Sunday 06:00: UFC Stats
+                   only follows the UFC, whose cards are on Saturdays, and a
+                   US card ends ~01:00, so by 06:00 its results are posted.
+                   That is after the 03:00 build, so a card reaches the models
+                   with Monday's build. A different site from Tapology, its
+                   own lock and its own LANDING tables. A UFC card is ~45
+                   requests, ~3 min.
   mmadecisions_crawl  judges' decisions -> lake -> LANDING
-                   (orchestration/mmadecisions.py). Weekly, Sunday 02:00, for
-                   the same reason; its own six lnd_mmadecisions_* tables.
+                   (orchestration/mmadecisions.py). Weekly, Sunday 06:00, for
+                   the same reasons; its own six lnd_mmadecisions_* tables.
                    It re-reads events up to 14 days old, so each card is read
                    the morning after and again a week later.
 
@@ -66,7 +69,7 @@ from .mmadecisions import mmadecisions_crawl
 from .ufcstats import ufcstats_crawl
 
 TIMEZONE = "America/Toronto"
-DAILY_0200, SUNDAY_0200 = "0 2 * * *", "0 2 * * 0"
+DAILY_0200, SUNDAY_0600 = "0 2 * * *", "0 6 * * 0"
 ON_PROD = IN_DAGSTER_PLUS and not IS_BRANCH_DEPLOYMENT
 SCHEDULE_STATUS = DefaultScheduleStatus.RUNNING if ON_PROD else DefaultScheduleStatus.STOPPED
 SENSOR_STATUS = DefaultSensorStatus.RUNNING if ON_PROD else DefaultSensorStatus.STOPPED
@@ -174,13 +177,13 @@ defs = Definitions(
         ),
         ScheduleDefinition(
             job=ufcstats_crawl,
-            cron_schedule=SUNDAY_0200,
+            cron_schedule=SUNDAY_0600,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
         ScheduleDefinition(
             job=mmadecisions_crawl,
-            cron_schedule=SUNDAY_0200,
+            cron_schedule=SUNDAY_0600,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),

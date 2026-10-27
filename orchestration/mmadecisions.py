@@ -18,7 +18,7 @@ per egress IP:
 A run that lands on an IP another run holds, or on 34.216.9.66, which
 MMADecisions refuses, fails before fetching anything, and the crawl_retry
 sensor launches it again, usually onto another IP. That goes for the weekly
-Sunday 02:00 run too.
+Sunday 06:00 run too.
 
 replay=true re-parses the latest copy of every archived page from the bucket
 with no requests to MMADecisions: a parser change is replayed, never re-crawled.
