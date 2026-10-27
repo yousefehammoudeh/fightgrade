@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: xref_decision_ufcstats_fight
+    description: >
+      Which UFC Stats fight each MMADecisions decision is, one to one: the bridge from
+      the judges' round scores to the round statistics. ufcstats_fighter_id_1/_2 are
+      the UFC Stats fighters in the decision's order (fighter 1 is its winner, or first
+      listed for a draw), so score pairs line up. scorecards_agree compares the judges'
+      totals on both sites: on 2026-10-27 99% agreed, and all 45 that did not were the
+      right fight with a source difference (a judge missing on UFC Stats, one total
+      differing, or a majority draw whose odd card UFC Stats prints the other way).
+    columns:
+      - name: decision_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+      - name: ufcstats_fight_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: ufcstats_fighter_id_1
+        data_tests: [not_null]
+      - name: ufcstats_fighter_id_2
+        data_tests: [not_null]
+      - name: match_method
+        data_tests:
+          - accepted_values:
+              arguments: {values: [names, surnames, one_name_and_a_shared_name, one_name, override]}
+
+  - name: xref_decision_ufcstats_fight_match_rate
+    description: >
+      The fight match's coverage per MMADecisions promotion logo. match_rate is set for
+      UFC only, the decisions UFC Stats is expected to have, less those an override
+      records as absent.
+    columns:
+      - name: promotion_logo
+        data_tests: [unique]

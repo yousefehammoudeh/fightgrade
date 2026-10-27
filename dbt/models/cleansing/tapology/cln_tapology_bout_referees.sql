@@ -11,4 +11,5 @@ select
     {{ blank_to_null('r.value:referee::varchar') }} as referee
 from events e,
     lateral flatten(input => e.p:referees) r
-where r.value:bout_slug is not null
+-- cast first: a JSON null is not SQL NULL (some rows list a referee with no bout link)
+where r.value:bout_slug::varchar is not null
