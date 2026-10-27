@@ -666,9 +666,11 @@ differ. Each rater also gets its own 10-8 cut-point offset.
   miss. If it clearly wins, the next step is a small neural net that keeps the order guarantee,
   with the z_j as judge embeddings.
 
-**Fitting:** PyTorch (available in Snowflake), seconds per fit; the low-rank fit is non-convex but
-tiny. Inference is a few matrix products, exported to numpy, so the model is a numpy-only
-`CustomModel` in the registry.
+**Fitting:** numpy and scipy's L-BFGS, with the gradients written out and checked against finite
+differences before every deploy (`ml/judge_lens/checks.py`). Seconds per fit; the low-rank fit is
+non-convex but tiny. Not PyTorch: this account installs procedure packages from PyPI, where `torch`
+brings several GB of CUDA libraries on x86. Inference is a few matrix products, so the model is a
+numpy-only `CustomModel` in the registry.
 
 ### Training, validation and testing
 
@@ -768,12 +770,13 @@ model scores a fight it trained on.
 |---|---|
 | Exploring | Snowflake Notebooks, or local Jupyter with a Snowpark session on DEV |
 | Experiment tracking | **Snowflake Experiments** (`ExperimentTracking`, snowflake-ml-python 1.19+, no extra charge): one experiment per stage, one run per configuration; fold metrics, reliability plots and the test-fight table as artifacts |
-| Training | A Dagster job `judge_lens_train`, on demand or weekly: reads the REFINED facts, fits, logs the run, registers a version, runs the checks above. The fit is seconds, so a warehouse or the Dagster process is enough; no compute pool |
+| Training | The stored procedure `ML.TRAIN_JUDGE_LENS(config)` on `FIGHTGRADE_WH` (Python 3.13; `ml/judge_lens`, deployed by `deploy.py`): one mode over one or more settings, each logged as a run. A two-setting CV takes ~47 s. A Dagster job `judge_lens_train`, on demand or weekly, calls it, registers a version and runs the checks above; the Dagster image needs nothing new |
 | The model | **Snowflake Model Registry**, a `CustomModel`, in a new `ML` schema per environment. Terraform creates the schema (dbt never creates schemas) and grants the transformer roles `CREATE MODEL` and `CREATE EXPERIMENT` |
 | Serving | `pub_judge_lens` and `pub_judge_profile` are dbt models that call the default version from SQL. The daily build only predicts |
 
 The model is linear in its terms, so if the Registry slips, a coefficients table and plain SQL
-are a free fallback. snowflake-ml-python 2.6.0 resolves on the project's Python 3.13.
+are a free fallback. The procedure pins snowflake-ml-python 2.6.0, which needs pandas below 3
+(2.3.3); `ml/requirements.txt` installs the same versions locally.
 
 **Limits to state before being asked:**
 - **Correlational, not causal.** Judges do not score independently; panel anchoring exists, and
