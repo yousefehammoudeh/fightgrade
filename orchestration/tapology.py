@@ -55,14 +55,14 @@ class TapologyCrawlConfig(Config):
 
 
 @contextmanager
-def crawler_log_to(context: OpExecutionContext):
+def crawler_log_to(context: OpExecutionContext, crawler=tap):
     """The crawler prints progress; send it to the Dagster run log instead."""
-    original = tap.log
-    tap.log = context.log.info
+    original = crawler.log
+    crawler.log = context.log.info
     try:
         yield
     finally:
-        tap.log = original
+        crawler.log = original
 
 
 @op
@@ -159,7 +159,7 @@ def load_landing(context: OpExecutionContext, bundle: dict) -> dict:
     if not bundle["staged"]:
         context.log.info("nothing new to load")
         return bundle
-    run_dbt(context, dbt_project_for(bundle["env"]), "build", "--select", "landing", "--target", bundle["env"])
+    run_dbt(context, dbt_project_for(bundle["env"]), "build", "--select", tap.DBT_SELECT, "--target", bundle["env"])
     return bundle
 
 

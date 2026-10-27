@@ -871,10 +871,15 @@ def backfill_title_bouts(since: str, limit: int, sleep: float, budget: Budget, e
     return crawl(0, sleep, budget, env, run_dir, set(), {}, todo, discover_events=False)
 
 
+# Only this source's LANDING tables. A run that built all of `landing` would also
+# load another crawler's new files, and two such loads at once insert them twice.
+DBT_SELECT = "path:models/landing/tapology"
+
+
 def load_landing_cli(env: str) -> bool:
     from dbt.cli.main import dbtRunner
 
-    res = dbtRunner().invoke(["build", "--select", "landing", "--target", env,
+    res = dbtRunner().invoke(["build", "--select", DBT_SELECT, "--target", env,
                               "--project-dir", str(ROOT / "dbt"), "--profiles-dir", str(Path("~/.dbt").expanduser())])
     return bool(res.success)
 
@@ -934,7 +939,7 @@ def main() -> int:
             if c["parquet"] != c["landing"]:
                 report["fails"].append(f"LANDING {t}: {c['landing']} rows loaded, {c['parquet']} expected")
         if not report["dbt_success"]:
-            report["fails"].append("dbt build --select landing failed")
+            report["fails"].append(f"dbt build --select {DBT_SELECT} failed")
 
     (run_dir / "report.json").write_text(json.dumps(report, indent=1))
     log("report:\n" + json.dumps(report, indent=1))
