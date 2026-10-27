@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  - name: stg_decision_fight_candidates
+    description: >
+      Every UFC Stats fight a MMADecisions decision could be, within a day and with at
+      least one fighter's name matching, scored by tier (1 both names, 2 both surnames,
+      3 one name and a shared name, 4 one name) in the better of the two fighter orders.
+    data_tests:
+      - unique_columns: {arguments: {columns: [decision_id, ufcstats_fight_id]}}

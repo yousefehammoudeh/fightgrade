@@ -42,7 +42,10 @@ models:
         description: NULL for a draw or no contest.
 
   - name: cln_ufcstats_fight_judges
-    description: One row per judge per fight, whole-fight score in fighter_1/fighter_2 order. Decisions only.
+    description: >
+      One row per judge per fight, whole-fight score in the fight page's fighter_1/fighter_2
+      order. UFC Stats prints the pair in reverse event-page order (winner second); this
+      turns it. Decisions only.
     data_tests:
       - unique_columns: {arguments: {columns: [ufcstats_fight_id, judge_slot]}}
     columns:

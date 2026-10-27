@@ -1,0 +1,30 @@
+version: 2
+
+seeds:
+  - name: xref_decision_ufcstats_fight_overrides
+    description: >
+      Hand-checked answers for decisions the name match cannot settle. A row with a
+      ufcstats_fight_id pins the decision to that fight (ufcstats_fighter_id_1 is the
+      UFC Stats fighter who is the decision's fighter 1); a row without one records
+      that UFC Stats has no such fight, which takes it out of the match rate's
+      denominator. Three rules, as for data/overrides/title_belts.jsonl: an override
+      only attaches to a decision and a fight we hold; every row names its source;
+      nothing is ever invented to fill a gap.
+    config:
+      column_types:
+        decision_id: varchar
+        ufcstats_fight_id: varchar
+        ufcstats_fighter_id_1: varchar
+        source: varchar
+        note: varchar
+    columns:
+      - name: decision_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+      - name: ufcstats_fight_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: source
+        data_tests: [not_null]

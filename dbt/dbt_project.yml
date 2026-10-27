@@ -5,6 +5,7 @@ profile: fightgrade
 model-paths: ["models"]
 macro-paths: ["macros"]
 test-paths: ["tests"]
+seed-paths: ["seeds"]
 
 clean-targets: ["target", "dbt_packages"]
 
@@ -26,3 +27,16 @@ models:
     cleansing:
       +schema: CLEANSING
       +materialized: table
+    # STAGING: intermediate models, used sparingly (DESIGN.md §5).
+    staging:
+      +schema: STAGING
+      +materialized: table
+    # REFINED: purpose-fit models; scope lives here.
+    refined:
+      +schema: REFINED
+      +materialized: table
+
+seeds:
+  fightgrade:
+    # Hand-curated inputs land beside the crawled sources.
+    +schema: LANDING
