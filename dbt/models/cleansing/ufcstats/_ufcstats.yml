@@ -1,0 +1,86 @@
+version: 2
+
+# UFC Stats, cleansed: typed, the newest fetch of each page, blanks to NULL.
+# Fighter order is the fight page's (fighter_1, fighter_2), not the winner first.
+models:
+  - name: cln_ufcstats_events
+    description: One row per completed event.
+    columns:
+      - name: ufcstats_event_id
+        data_tests: [unique, not_null]
+      - name: event_date
+        data_tests: [not_null]
+
+  - name: cln_ufcstats_event_fights
+    description: The event page's card, main event first (card_position 1).
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_event_id, card_position]}}
+    columns:
+      - name: ufcstats_fight_id
+        data_tests:
+          - unique
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+
+  - name: cln_ufcstats_fights
+    description: >
+      One row per fight. fight_seconds is the elapsed time: earlier rounds at their
+      scheduled length plus the clock in the final round; NULL with no time limit.
+    columns:
+      - name: ufcstats_fight_id
+        data_tests: [unique, not_null]
+      - name: ufcstats_event_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('cln_ufcstats_events'), field: ufcstats_event_id}}
+      - name: result_1
+        data_tests:
+          - accepted_values: {arguments: {values: [W, L, D, NC]}}
+      - name: gender
+        data_tests:
+          - accepted_values: {arguments: {values: [M, F]}}
+      - name: winner_fighter_id
+        description: NULL for a draw or no contest.
+
+  - name: cln_ufcstats_fight_judges
+    description: One row per judge per fight, whole-fight score in fighter_1/fighter_2 order. Decisions only.
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_fight_id, judge_slot]}}
+    columns:
+      - name: ufcstats_fight_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: judge_name
+        data_tests: [not_null]
+
+  - name: cln_ufcstats_fight_totals
+    description: One row per fighter per fight, with the significant-strike breakdowns by target and position.
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_fight_id, ufcstats_fighter_id]}}
+    columns:
+      - name: ufcstats_fight_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: head_landed
+        description: NULL only if the strike-breakdown table has no row for this fighter.
+        data_tests: [not_null]
+
+  - name: cln_ufcstats_fight_rounds
+    description: One row per fighter per round, with the significant-strike breakdowns. The judge model's statistics.
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_fight_id, ufcstats_fighter_id, round]}}
+    columns:
+      - name: ufcstats_fight_id
+        data_tests:
+          - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
+      - name: head_landed
+        data_tests: [not_null]
+      - name: distance_landed
+        data_tests: [not_null]
+
+  - name: cln_ufcstats_fighters
+    description: One row per fighter, from their newest page.
+    columns:
+      - name: ufcstats_fighter_id
+        data_tests: [unique, not_null]
+      - name: wins
+        data_tests: [not_null]
