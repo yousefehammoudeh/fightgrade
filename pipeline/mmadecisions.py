@@ -10,9 +10,11 @@ is the other crawlers' (pipeline/tapology.py, pipeline/ufcstats.py): headed
 Chrome loads the event index once, then every page is a same-origin fetch()
 inside that page, archived as the server sent it.
 
-Only raw HTML for now: the decision-page tables (round-by-round judges'
-scores, media scores, fan scoring, tale of the tape) are extracted from the
-archive once their format is agreed, so nothing here loads LANDING.
+Six tables (scrapers/extract/mmadecisions_extract.py), parsed from the
+archived pages: events, decisions, judge_rounds, judge_totals, media_scores,
+fan_scores. `--replay` re-parses the latest copy of every archived page from
+the bucket with no requests to MMADecisions: a parser change is replayed,
+never re-crawled.
 
 Discovery is /decisions-by-event/<year>/, one page per year back to 1995 (each
 row: event, date, number of decisions). An event page lists its decisions.
@@ -29,7 +31,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .lake import Lake, environment, new_run_id, raw_html_key, zone
-from .tapology import Budget, Stop, egress_ip, virtual_display
+from .tapology import (Budget, Stop, egress_ip, parsed_key, roundtrip_mismatches, snowflake_cursor, stage,
+                       virtual_display)
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "_crawlruns" / "mmadecisions"
@@ -37,7 +40,12 @@ BASE = "https://mmadecisions.com"
 INDEX = BASE + "/decisions-by-event/{}/"
 
 sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from mmadecisions_extract import index_years, parse_event_decisions, parse_event_index  # noqa: E402
+from mmadecisions_extract import (index_years, parse_decision, parse_event, parse_event_decisions,  # noqa: E402
+                                  parse_event_index)
+
+TABLES = ("mmadecisions_events", "mmadecisions_decisions", "mmadecisions_judge_rounds",
+          "mmadecisions_judge_totals", "mmadecisions_media_scores", "mmadecisions_fan_scores")
+DBT_SELECT = "path:models/landing/mmadecisions"     # only this source's tables
 
 # Pacing, start to start. A decision page takes ~1.7 s to render on their side,
 # so the gap after a response is what is left of the interval, if anything.
@@ -258,11 +266,73 @@ def crawl(limit: int, budget: Budget, interval: float, env: str, run_dir: Path, 
             br.close()
 
     left = [q for q in worklist if q["event_id"] not in done] + retry
+    rows, parse_failures = page_rows(pages)
+    anomalies += parse_failures
     report.update(requests=budget.spent, queued_for_next_run=len(left))
     log(f"{budget.spent} requests spent; {report['decision_pages_kept']} decisions and {report['events_kept']} "
         f"events archived; {len(left)} events queued for the next run")
-    return {"fetch_date": fetch_date, "pages": pages, "report": dict(report), "anomalies": anomalies,
+    return {"fetch_date": fetch_date, "pages": pages, "rows": rows, "report": dict(report), "anomalies": anomalies,
             "stopped": stopped, "state": {"queue": left, "counts": counts} if discover else None, "leftover": left}
+
+
+def page_rows(pages: list[tuple[Path, str]]) -> tuple[dict[str, list], list[dict]]:
+    """Archived event and decision pages -> the six tables' rows, and parse failures.
+    Each row carries the page's bucket key and fetch_date. The crawl and --replay
+    both come through here, so a replay gives exactly what the crawl did."""
+    rows, anomalies = {t: [] for t in TABLES}, []
+    for local, key in pages:
+        entity, ident = key.split("/entity=", 1)[1].split("/", 1)[0], local.name[: -len(".html.gz")]
+        if entity not in ("event", "decision"):
+            continue
+        fetch_date = key.split("/fetch_date=", 1)[1].split("/", 1)[0]
+        html = gzip.decompress(local.read_bytes()).decode("utf-8")
+        try:
+            if entity == "event":
+                out = {"mmadecisions_events": [parse_event(html, ident)]}
+            else:
+                d = parse_decision(html, ident)
+                out = {"mmadecisions_decisions": [d["decision"]], "mmadecisions_judge_rounds": d["judge_rounds"],
+                       "mmadecisions_judge_totals": d["judge_totals"], "mmadecisions_media_scores": d["media_scores"],
+                       "mmadecisions_fan_scores": d["fan_scores"]}
+        except Exception as ex:          # archived all the same; fix the parser and replay
+            anomalies.append({"id": f"{entity}/{ident}", "code": "parse_failed", "detail": f"{type(ex).__name__}: {ex}"})
+            continue
+        for table, recs in out.items():
+            for r in recs:
+                r["_raw_html_key"], r["fetch_date"] = key, fetch_date
+            rows[table] += recs
+    return rows, anomalies
+
+
+def replay(lake: Lake, env: str, run_dir: Path) -> dict:
+    """Re-parse the latest archived copy of every event and decision page in this
+    environment's zone, straight from the bucket. No requests to MMADecisions."""
+    latest: dict[tuple[str, str], str] = {}
+    prefix = f"{zone(env)}raw-html/source=mmadecisions/"
+    for blob in lake.bucket.list_blobs(prefix=prefix):
+        entity = blob.name.split("/entity=", 1)[1].split("/", 1)[0]
+        if entity in ("event", "decision") and blob.name.endswith(".html.gz"):
+            ident = blob.name.rsplit("/", 1)[1][: -len(".html.gz")]
+            if blob.name > latest.get((entity, ident), ""):          # fetch_date sorts as text
+                latest[(entity, ident)] = blob.name
+    log(f"replay: {sum(e == 'event' for e, _ in latest):,} event and "
+        f"{sum(e == 'decision' for e, _ in latest):,} decision pages in {prefix}")
+
+    def download(item):
+        (entity, ident), key = item
+        local = run_dir / "raw" / entity / f"{ident}.html.gz"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        lake.bucket.blob(key).download_to_filename(str(local))
+        return local, key
+
+    with ThreadPoolExecutor(LAKE_THREADS * 2) as pool:
+        pages = list(pool.map(download, sorted(latest.items())))
+    rows, anomalies = page_rows(pages)
+    log(f"replay: parsed into {', '.join(f'{len(r):,} {t}' for t, r in rows.items())}; "
+        f"{len(anomalies)} pages failed to parse")
+    return {"fetch_date": date.today().isoformat(), "pages": pages, "rows": rows, "anomalies": anomalies,
+            "stopped": None, "state": None, "leftover": [], "replay": True,
+            "report": {"pages_replayed": len(pages), **{f"rows_{t}": len(r) for t, r in rows.items()}}}
 
 
 def known_pages(lake: Lake, env: str) -> dict[str, set[str]]:
@@ -303,7 +373,8 @@ def plan_backfill(lake: Lake, env: str, interval: float, budget: Budget, known: 
     n_dec = sum(e["n"] or 0 for e in events)
     log(f"backfill plan: {len(events)} events in {len(run_pages)} years, {n_dec:,} decisions listed; "
         f"{len(todo)} events and ~{n_dec - len(known['decision']):,} decisions not archived yet")
-    return {"fetch_date": fetch_date, "pages": [], "index_pages": run_pages, "anomalies": [], "stopped": None,
+    return {"fetch_date": fetch_date, "pages": [], "rows": {t: [] for t in TABLES}, "index_pages": run_pages,
+            "anomalies": [], "stopped": None,
             "report": {"planned_events": len(events), "listed_decisions": n_dec, "events_to_fetch": len(todo),
                        "decisions_archived": len(known["decision"]), "requests": budget.spent},
             "state": None, "leftover": []}
@@ -361,10 +432,15 @@ def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES,
             lake.delete(lock)
 
 
-def upload(lake: Lake, result: dict) -> int:
+def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
+    """Raw pages first (a replay's are in the bucket already), then the Parquet."""
+    pages = [] if result.get("replay") else result["pages"]
     with ThreadPoolExecutor(LAKE_THREADS) as pool:
-        list(pool.map(lambda p: lake.upload_file(p[0], p[1], "application/gzip"), result["pages"]))
-    return len(result["pages"])
+        list(pool.map(lambda p: lake.upload_file(p[0], p[1], "application/gzip"), pages))
+    files = [f for _, fs in staged.values() for f in fs]
+    for f in files:
+        lake.upload_file(f, parsed_key(f, run_dir, env), "application/octet-stream")
+    return len(pages), len(files)
 
 
 def save_state(lake: Lake, env: str, result: dict, shard: int | None, run_id: str) -> None:
@@ -376,8 +452,9 @@ def save_state(lake: Lake, env: str, result: dict, shard: int | None, run_id: st
                         {"run_id": run_id, "leftover": result["leftover"], "anomalies": result["anomalies"][:500]})
 
 
-def verify(result: dict, lake: Lake | None) -> dict:
-    """Every archived page is valid gzip and, once uploaded, the same size in the bucket."""
+def verify(result: dict, staged: dict, run_dir: Path, env: str, lake: Lake | None) -> dict:
+    """Every archived page is valid gzip and, once uploaded, the same size in the
+    bucket; every page parsed; the Parquet holds exactly the parsed rows."""
     fails, warns = [], []
     with ThreadPoolExecutor(LAKE_THREADS) as pool:
         in_bucket = dict(pool.map(lambda p: (p[1], lake.size(p[1])), result["pages"])) if lake else {}
@@ -389,16 +466,50 @@ def verify(result: dict, lake: Lake | None) -> dict:
             fails.append(f"corrupt gzip: {local.name}")
         if lake and in_bucket[key] != local.stat().st_size:
             fails.append(f"raw page missing or wrong size in bucket: {key}")
-    warns += [f"{a['code']}: {a['id']} {a['detail'][:80]}" for a in result["anomalies"]]
+    for a in result["anomalies"]:
+        (fails if a["code"] == "parse_failed" else warns).append(f"{a['code']}: {a['id']} {a['detail'][:80]}")
+    raw_keys = {k for _, k in result["pages"]}
+    for table, recs in result["rows"].items():
+        n = staged.get(table, (0, []))[0]
+        if n != len(recs):
+            fails.append(f"{table}: {len(recs)} rows parsed but {n} in Parquet")
+        if {r["_raw_html_key"] for r in recs} - raw_keys:
+            fails.append(f"{table}: rows point at an unarchived page")
+    if lake:
+        for _, files in staged.values():
+            for f in files:
+                if lake.size(parsed_key(f, run_dir, env)) != f.stat().st_size:
+                    fails.append(f"Parquet missing or wrong size in bucket: {parsed_key(f, run_dir, env)}")
+    fails += roundtrip_mismatches(result["rows"], staged)
     if result["stopped"]:
         warns.append(result["stopped"])
     return {"fails": fails, "warns": warns}
 
 
-def run(env: str, run_id: str, lake: Lake, budget: Budget, interval: float, limit: int = 0,
-        plan: bool = False, shard: int | None = None, shards: int = 0) -> dict:
-    """One fetch of whichever kind, with its year pages archived."""
+def landing_counts(run_id: str, staged: dict, env: str) -> dict:
+    """Rows of this run's files that LANDING now holds, per table."""
+    cur, out = snowflake_cursor(env), {}
+    for table, (n, _) in staged.items():
+        cur.execute(f"select count(*) from FIGHTGRADE_{env.upper()}.LANDING.LND_{table.upper()} "
+                    f"where _object_key like %s", (f"%part-{run_id}-%",))
+        out[table] = {"parquet": n, "landing": cur.fetchone()[0]}
+    return out
+
+
+def load_landing_cli(env: str) -> bool:
+    from dbt.cli.main import dbtRunner
+
+    res = dbtRunner().invoke(["build", "--select", DBT_SELECT, "--target", env,
+                              "--project-dir", str(ROOT / "dbt"), "--profiles-dir", str(Path("~/.dbt").expanduser())])
+    return bool(res.success)
+
+
+def run(env: str, run_id: str, lake: Lake, budget: Budget | None, interval: float, limit: int = 0,
+        plan: bool = False, shard: int | None = None, shards: int = 0, do_replay: bool = False) -> dict:
+    """One run of whichever kind, with its year pages archived."""
     run_dir = RUNS / run_id
+    if do_replay:
+        return replay(lake, env, run_dir)
     known = known_pages(lake, env)
     log(f"{len(known['event']):,} events and {len(known['decision']):,} decisions already archived")
     if plan:
@@ -423,6 +534,8 @@ def main() -> int:
     ap.add_argument("--backfill-plan", action="store_true", help="write the all-events plan from the 32 year pages")
     ap.add_argument("--backfill-shard", type=int, metavar="K")
     ap.add_argument("--backfill-shards", type=int, default=0, metavar="N")
+    ap.add_argument("--replay", action="store_true",
+                    help="re-parse every archived page from the bucket and load LANDING; no requests to MMADecisions")
     args = ap.parse_args()
     if args.interval < FLOOR_INTERVAL:
         ap.error(f"--interval below {FLOOR_INTERVAL} s is faster than MMADecisions agreed to")
@@ -431,15 +544,33 @@ def main() -> int:
     run_id = new_run_id()
     log(f"run {run_id} env={env} zone='{zone(env)}' -> {(RUNS / run_id).relative_to(ROOT)}")
     lake = Lake(env)
-    with ip_budget(lake, args.max_requests, args.max_minutes, args.daily_budget) as budget:
-        result = run(env, run_id, lake, budget, args.interval, args.limit, args.backfill_plan,
-                     args.backfill_shard, args.backfill_shards)
+    run_dir = RUNS / run_id
+    if args.replay:
+        result = run(env, run_id, lake, None, args.interval, do_replay=True)
+    else:
+        with ip_budget(lake, args.max_requests, args.max_minutes, args.daily_budget) as budget:
+            result = run(env, run_id, lake, budget, args.interval, args.limit, args.backfill_plan,
+                         args.backfill_shard, args.backfill_shards)
+    shutil.rmtree(run_dir / "tables", ignore_errors=True)
+    shutil.rmtree(run_dir / "parsed", ignore_errors=True)
+    staged = stage(result["rows"], run_dir, run_id)
+    backfill = args.backfill_plan or bool(args.backfill_shards)
     if not args.dry_run:
-        n = upload(lake, result)
+        n_pages, n_files = upload(lake, result, staged, run_dir, env)
         save_state(lake, env, result, args.backfill_shard if args.backfill_shards else None, run_id)
-        log(f"uploaded {n} raw pages")
-    checks = verify(result, None if args.dry_run else lake)
-    report = {"run_id": run_id, "env": env, "fetch_date": result["fetch_date"], "crawl": result["report"], **checks}
+        log(f"uploaded {n_pages} raw pages and {n_files} Parquet files")
+    checks = verify(result, staged, run_dir, env, None if args.dry_run else lake)
+    report = {"run_id": run_id, "env": env, "fetch_date": result["fetch_date"], "crawl": result["report"],
+              "rows": {t: len(r) for t, r in result["rows"].items()}, **checks}
+    # A backfill loads LANDING once, after every shard; a replay or a daily run loads its own.
+    if not args.dry_run and not backfill and not checks["fails"] and staged:
+        report["dbt_success"] = load_landing_cli(env)
+        report["landing"] = landing_counts(run_id, staged, env)
+        for t, c in report["landing"].items():
+            if c["parquet"] != c["landing"]:
+                report["fails"].append(f"LANDING {t}: {c['landing']} rows loaded, {c['parquet']} expected")
+        if not report["dbt_success"]:
+            report["fails"].append(f"dbt build --select {DBT_SELECT} failed")
     (RUNS / run_id).mkdir(parents=True, exist_ok=True)
     (RUNS / run_id / "report.json").write_text(json.dumps(report, indent=1))
     log("report:\n" + json.dumps({**report, "warns": report["warns"][:20]}, indent=1))

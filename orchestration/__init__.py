@@ -23,9 +23,9 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    (orchestration/ufcstats.py). Daily at 02:00 beside
                    tapology_crawl: a different site, its own IP budget and
                    its own LANDING tables. A UFC card is ~45 requests, ~3 min.
-  mmadecisions_crawl  judges' decisions -> raw HTML in the lake
-                   (orchestration/mmadecisions.py). Daily at 02:00; no
-                   LANDING load until the decision-page extractor exists.
+  mmadecisions_crawl  judges' decisions -> lake -> LANDING
+                   (orchestration/mmadecisions.py). Daily at 02:00, its
+                   own six lnd_mmadecisions_* tables.
 
 Schedules and the sensor run only on the Dagster+ production deployment.
 Locally they start stopped, so a laptop never races the cloud for the same 03:00
