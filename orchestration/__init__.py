@@ -20,14 +20,24 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    Europe's morning. Its fetch stops by 02:30, so LANDING is
                    loaded before the 03:00 build publishes it.
   ufcstats_crawl   newly completed UFC Stats events -> lake -> LANDING
-                   (orchestration/ufcstats.py). Daily at 02:00 beside
-                   tapology_crawl: a different site, its own IP budget and
-                   its own LANDING tables. A UFC card is ~45 requests, ~3 min.
+                   (orchestration/ufcstats.py). Weekly, Sunday 06:00: UFC Stats
+                   only follows the UFC, whose cards are on Saturdays, and a
+                   US card ends ~01:00, so by 06:00 its results are posted.
+                   That is after the 03:00 build, so a card reaches the models
+                   with Monday's build. A different site from Tapology, its
+                   own lock and its own LANDING tables. A UFC card is ~45
+                   requests, ~3 min.
   mmadecisions_crawl  judges' decisions -> lake -> LANDING
-                   (orchestration/mmadecisions.py). Daily at 02:00, its
-                   own six lnd_mmadecisions_* tables.
+                   (orchestration/mmadecisions.py). Weekly, Sunday 06:00, for
+                   the same reasons; its own six lnd_mmadecisions_* tables.
+                   It re-reads events up to 14 days old, so each card is read
+                   the morning after and again a week later.
 
-Schedules and the sensor run only on the Dagster+ production deployment.
+A crawl that stops before archiving anything fails, and the crawl_retry sensor
+launches it again with the same config: Serverless gives each run one of 3
+egress IPs, and MMADecisions refuses one of them.
+
+Schedules and the sensors run only on the Dagster+ production deployment.
 Locally they start stopped, so a laptop never races the cloud for the same 03:00
 build, and a branch deployment builds DEV instead of PROD.
 """
@@ -41,21 +51,25 @@ from dagster import (
     Definitions,
     OpExecutionContext,
     RunRequest,
+    RunFailureSensorContext,
     RunStatusSensorContext,
     ScheduleDefinition,
+    SkipReason,
     in_process_executor,
     job,
     op,
+    run_failure_sensor,
     run_status_sensor,
 )
 
 from .dbt_cli import run_dbt
 from .main_checkout import IN_DAGSTER_PLUS, IS_BRANCH_DEPLOYMENT, main_dbt_project
-from .tapology import tapology_crawl
+from .tapology import RETRY_ON_ANOTHER_IP, tapology_crawl
 from .mmadecisions import mmadecisions_crawl
 from .ufcstats import ufcstats_crawl
 
 TIMEZONE = "America/Toronto"
+DAILY_0200, SUNDAY_0600 = "0 2 * * *", "0 6 * * 0"
 ON_PROD = IN_DAGSTER_PLUS and not IS_BRANCH_DEPLOYMENT
 SCHEDULE_STATUS = DefaultScheduleStatus.RUNNING if ON_PROD else DefaultScheduleStatus.STOPPED
 SENSOR_STATUS = DefaultSensorStatus.RUNNING if ON_PROD else DefaultSensorStatus.STOPPED
@@ -119,8 +133,35 @@ def resync_dev(context: RunStatusSensorContext) -> RunRequest:
     return RunRequest(run_key=context.dagster_run.run_id)
 
 
+CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl]
+IP_RETRY_TAG = "fightgrade/ip_retry"
+# With one refused IP in three, four misses in a row is about one night in 80.
+MAX_IP_RETRIES = 3
+
+
+def failure_text(event) -> str:
+    data = event.step_failure_data
+    return " ".join(filter(None, [data.error.message if data.error else None,
+                                  data.user_failure_data.description if data.user_failure_data else None]))
+
+
+@run_failure_sensor(monitored_jobs=CRAWLS, request_jobs=CRAWLS, default_status=SENSOR_STATUS)
+def crawl_retry(context: RunFailureSensorContext):
+    """Launch a crawl again, same config, when it stopped before archiving anything:
+    the new run gets its own egress IP, usually another one. Any other failure is
+    left alone, since a failed check would fail again and re-crawl on the way."""
+    run = context.dagster_run
+    if not any(RETRY_ON_ANOTHER_IP in failure_text(e) for e in context.get_step_failure_events()):
+        return SkipReason(f"{run.run_id[:8]} failed after fetching, or for another reason: not retried")
+    tries = int(run.tags.get(IP_RETRY_TAG, "0"))
+    if tries >= MAX_IP_RETRIES:
+        return SkipReason(f"{run.run_id[:8]} was already retry {tries} of {MAX_IP_RETRIES}")
+    return RunRequest(run_key=f"{run.run_id}-ip-retry", job_name=run.job_name, run_config=run.run_config,
+                      tags={IP_RETRY_TAG: str(tries + 1)})
+
+
 defs = Definitions(
-    jobs=[dbt_prod_build, dbt_resync_dev, tapology_crawl, ufcstats_crawl, mmadecisions_crawl],
+    jobs=[dbt_prod_build, dbt_resync_dev, *CRAWLS],
     schedules=[
         ScheduleDefinition(
             job=dbt_prod_build,
@@ -130,22 +171,22 @@ defs = Definitions(
         ),
         ScheduleDefinition(
             job=tapology_crawl,
-            cron_schedule="0 2 * * *",
+            cron_schedule=DAILY_0200,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
         ScheduleDefinition(
             job=ufcstats_crawl,
-            cron_schedule="0 2 * * *",
+            cron_schedule=SUNDAY_0600,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
         ScheduleDefinition(
             job=mmadecisions_crawl,
-            cron_schedule="0 2 * * *",
+            cron_schedule=SUNDAY_0600,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
     ],
-    sensors=[resync_dev],
+    sensors=[resync_dev, crawl_retry],
 )

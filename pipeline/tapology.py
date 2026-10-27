@@ -16,8 +16,8 @@ so a weekly sweep of the sitemap queues what it cannot reach. Title bouts on
 those cards also get their bout page, which is what bout_details is built from.
 
 Polite by construction: one browser, one page at a time, no retry loops, and
-at most DAILY_BUDGET requests a day from one IP. Work the budget cannot reach
-is queued in the lake for the next run, never dropped. A Cloudflare challenge
+at most DAILY_BUDGET requests a run. Work the budget cannot reach is queued in
+the lake for the next run, never dropped. A Cloudflare challenge
 mid-run gets a minute of quiet and one ordinary page load, at most twice; a 503
 or 429 ends the run at once. Either way the crawl stops instead of hammering — a
 block that is kept warm never clears (HANDOFF.stage2.md §3).
@@ -73,11 +73,11 @@ BACKOFF = (15, 45)          # seconds, for a soft failure (503, unavailable page
 DEFAULT_SLEEP = 4.0
 RECLEAR_WAIT = 60           # seconds of quiet before re-loading a challenged page
 MAX_RECLEARS = 2            # per run; past that, stop rather than push
-# The IP budget. The VPN crawl measured ~530 events per IP at 1.0 s before
+# The run's budget. The VPN crawl measured ~530 events per IP at 1.0 s before
 # Tapology's first 503, and rotated proactively at 450 (HANDOFF.md §8). There is
-# no rotation here, so 450 is a daily cap per egress IP: every request counts,
-# discovery and retries included, whichever run or zone spent it. A peak Saturday
-# is ~268 pages. What a day cannot fetch waits in the queue for the next one.
+# no rotation here, so 450 is what one run may spend, discovery and retries
+# included. A peak Saturday is ~268 pages. What a run cannot fetch waits in the
+# queue for the next one. A backfill also keeps a per-IP daily ledger (ip_budget).
 DAILY_BUDGET = 450
 MAX_FETCH_MINUTES = 30      # stop fetching by then, so LANDING loads before the 03:00 build
 RATE_LIMITED = (429, 503)   # per-IP: waiting does nothing (HANDOFF.md §8), so stop and defer
@@ -116,15 +116,16 @@ def queue_key(env: str) -> str:
 
 
 class Budget:
-    """Requests left today on this IP, and the run's fetch deadline."""
+    """Requests this run may spend, and its fetch deadline. `why` names what set the
+    limit, for the Stop: the run's own cap, a backfill's daily ledger, another run."""
 
-    def __init__(self, limit: int, minutes: float = MAX_FETCH_MINUTES):
-        self.limit, self.spent = limit, 0
+    def __init__(self, limit: int, minutes: float = MAX_FETCH_MINUTES, why: str = "request budget spent"):
+        self.limit, self.spent, self.why = limit, 0, why
         self.deadline = time.time() + minutes * 60
 
     def take(self) -> None:
         if self.spent >= self.limit:
-            raise Stop(f"daily budget spent ({self.limit} requests)")
+            raise Stop(f"{self.why} ({self.limit} requests)")
         if time.time() > self.deadline:
             raise Stop(f"fetch deadline reached ({MAX_FETCH_MINUTES} min)")
         self.spent += 1
@@ -663,7 +664,7 @@ def unfinished_events(env: str) -> set[str]:
 
 
 def egress_ip() -> str:
-    """The address Tapology sees, which the daily budget is kept against."""
+    """The address the site sees, which the lock and the ledger are kept against."""
     import urllib.request
     try:
         return urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode().strip()
@@ -672,35 +673,47 @@ def egress_ip() -> str:
 
 
 @contextmanager
-def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int = DAILY_BUDGET):
-    """Today's remaining requests on this egress IP, recorded in the lake after the
-    run whether it finished or not: a request spent is spent.
+def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int | None = None,
+              budget_key: str = BUDGET_KEY, lock_prefix: str = LOCK_PREFIX, site: str = "Tapology", say=None):
+    """The run's request budget on its egress IP, recorded in the lake's ledger after
+    the run whether it finished or not: a request spent is spent.
 
-    Serverless runs leave through 15 shared IPs, so two runs at once can land on
-    the same one. The first takes a lock on it; a second gets no budget and stops
-    before its first request. A lock older than LOCK_STALE_HOURS is a run that
-    died without releasing it. `daily` raises the per-IP cap for a backfill, whose
-    guardrails are then the 503/429 stop and the challenge limit."""
+    Serverless runs leave through 3 shared IPs, so two runs at once can land on the
+    same one. The first takes a lock on it; a second gets no budget and stops before
+    its first request. A lock older than LOCK_STALE_HOURS is a run that died without
+    releasing it.
+
+    A daily run may spend `max_requests`, whatever the IP spent earlier today. A
+    backfill passes `daily`, the per-IP cap its shards share: what the ledger holds
+    for today comes off it, so a shard relaunched on the same IP stays within it.
+    Each site keeps its own lock and ledger (`lock_prefix`, `budget_key`), and logs
+    through its own `say`, which the orchestration points at the run's log."""
     ip, today = egress_ip(), date.today().isoformat()
-    lock = f"{LOCK_PREFIX}{ip}.json"
+    lock = f"{lock_prefix}{ip}.json"
     held = lake.create(lock, {"since": time.time()})
     if not held and (lake.age_seconds(lock) or 0) > LOCK_STALE_HOURS * 3600:
         lake.delete(lock)
         held = lake.create(lock, {"since": time.time()})
-    spent = lake.read_json(BUDGET_KEY, {}).get(ip, {}).get(today, 0)
-    budget = Budget(max(min(max_requests, daily - spent), 0) if held else 0, minutes)
-    log(f"egress IP {ip}: {spent}/{daily} requests spent today, this run may spend {budget.limit}"
+    spent = lake.read_json(budget_key, {}).get(ip, {}).get(today, 0)
+    if not held:
+        budget = Budget(0, minutes, "another run holds this egress IP")
+    elif daily is None:
+        budget = Budget(max_requests, minutes)
+    else:
+        budget = Budget(max(min(max_requests, daily - spent), 0), minutes, "daily budget spent")
+    (say or log)(f"egress IP {ip}: {spent} {site} requests spent today"
+        + ("" if daily is None else f" of the backfill's {daily}") + f", this run may spend {budget.limit}"
         + ("" if held else " (another run holds this IP)"))
     try:
         yield budget
     finally:
         if held:
-            ledger = lake.read_json(BUDGET_KEY, {})
+            ledger = lake.read_json(budget_key, {})
             week_ago = (date.today() - timedelta(days=7)).isoformat()
             days = {d: n for d, n in ledger.get(ip, {}).items() if d > week_ago}
             days[today] = days.get(today, 0) + budget.spent
             ledger[ip] = days
-            lake.write_json(BUDGET_KEY, ledger)
+            lake.write_json(budget_key, ledger)
             lake.delete(lock)
 
 
@@ -710,7 +723,10 @@ def daily_crawl(lake: Lake, env: str, run_dir: Path, limit: int, sleep: float, b
     state = lake.read_json(queue_key(env), {})
     since = (date.today() - timedelta(days=BOUT_LOOKBACK_DAYS)).isoformat()
     bouts = pending_title_bouts(env, since)
-    log(f"{len(state.get('queue', []))} events and {len(bouts)} title-bout pages deferred by earlier runs")
+    queue, today = state.get("queue", []), date.today().isoformat()
+    parked = sum(1 for q in queue if q.get("after", "") > today)
+    log(f"{len(queue) - parked} events and {len(bouts)} title-bout pages deferred by earlier runs; "
+        f"{parked} upcoming events wait for their date")
     sweep_from = None
     last = state.get("last_sweep")
     if not last or (date.today() - date.fromisoformat(last)).days >= SWEEP_EVERY_DAYS:
@@ -889,7 +905,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="completed events to keep (0: as many as the budget allows)")
     ap.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help=f"seconds between requests (default {DEFAULT_SLEEP})")
     ap.add_argument("--max-requests", type=int, default=DAILY_BUDGET,
-                    help=f"requests this run may spend, within today's {DAILY_BUDGET} for this IP")
+                    help=f"requests this run may spend (default {DAILY_BUDGET})")
     ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES,
                     help=f"stop fetching after this many minutes (default {MAX_FETCH_MINUTES}, for the 03:00 build)")
     ap.add_argument("--dry-run", action="store_true", help="crawl and stage locally; upload and load nothing")
@@ -915,7 +931,8 @@ def main() -> int:
         known -= {e["event_slug"] for e in result["rows"]["event_details"]}   # this run's own pages
         log(f"rebuilt {result['report']} from {run_dir.relative_to(ROOT)}/raw")
     else:
-        with ip_budget(lake, args.max_requests, args.max_minutes) as budget:
+        daily = DAILY_BUDGET if args.title_bouts_since else None     # a title-bout catch-up is a backfill
+        with ip_budget(lake, args.max_requests, args.max_minutes, daily) as budget:
             if args.title_bouts_since:
                 result = backfill_title_bouts(args.title_bouts_since, args.limit, args.sleep, budget, env, run_dir)
             else:

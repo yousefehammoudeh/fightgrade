@@ -18,21 +18,20 @@ never re-crawled.
 
 Discovery is /decisions-by-event/<year>/, one page per year back to 1995 (each
 row: event, date, number of decisions). An event page lists its decisions.
-Decisions are added to an event over the days after it, so the daily run
-re-reads recent events whose count on the index has changed. An event's page is
+Decisions are added to an event over the days after it, so the scheduled
+run (weekly, Sunday) re-reads recent events whose count on the index has changed. An event's page is
 archived last, once every decision on it is: an event in the archive is
 complete as of its fetch, and a run cut short redoes that event.
 """
 import argparse, gzip, json, os, shutil, sys, tempfile, time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
 from .lake import Lake, environment, new_run_id, raw_html_key, zone
-from .tapology import (Budget, Stop, egress_ip, parsed_key, roundtrip_mismatches, snowflake_cursor, stage,
-                       virtual_display)
+from .tapology import (Budget, Stop, ip_budget as shared_ip_budget, parsed_key, roundtrip_mismatches,
+                       snowflake_cursor, stage, virtual_display)
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "_crawlruns" / "mmadecisions"
@@ -52,7 +51,7 @@ DBT_SELECT = "path:models/landing/mmadecisions"     # only this source's tables
 MIN_INTERVAL = 2.5
 FLOOR_INTERVAL = 2.0        # the low end of what MMADecisions agreed to
 BACKOFF = (15, 45)
-DAILY_BUDGET = 1000         # ~45 min at 2.5 s; a UFC weekend is ~30 requests
+DAILY_BUDGET = 1000         # a run's requests, ~45 min at 2.5 s (a UFC weekend is ~30); a backfill's per-IP daily cap too
 MAX_FETCH_MINUTES = 30
 RATE_LIMITED = (429, 503)
 MAX_TRIES = 7               # runs an event may stay unfinished before it is dropped (and reported)
@@ -60,7 +59,6 @@ RECHECK_DAYS = 14           # events this recent are re-read when their decision
 FIRST_YEAR = 1995
 BUDGET_KEY = "state/mmadecisions/ip_budget.json"
 LOCK_PREFIX = "state/mmadecisions/ip_lock/"
-LOCK_STALE_HOURS = 3
 LAKE_THREADS = 8
 PAGE_MARK = "MMADecisions.com"      # in every real page's footer; error pages lack it
 
@@ -405,31 +403,10 @@ def backfill_shard(lake: Lake, env: str, run_dir: Path, interval: float, budget:
     return crawl(0, budget, interval, env, run_dir, known, {"queue": todo}, discover=False)
 
 
-@contextmanager
-def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int = DAILY_BUDGET):
-    """Today's remaining MMADecisions requests on this egress IP, with a lock so two
-    runs never share an IP. Same rules as pipeline.tapology.ip_budget, its own ledger."""
-    ip, today = egress_ip(), date.today().isoformat()
-    lock = f"{LOCK_PREFIX}{ip}.json"
-    held = lake.create(lock, {"since": time.time()})
-    if not held and (lake.age_seconds(lock) or 0) > LOCK_STALE_HOURS * 3600:
-        lake.delete(lock)
-        held = lake.create(lock, {"since": time.time()})
-    spent = lake.read_json(BUDGET_KEY, {}).get(ip, {}).get(today, 0)
-    budget = Budget(max(min(max_requests, daily - spent), 0) if held else 0, minutes)
-    log(f"egress IP {ip}: {spent}/{daily} MMADecisions requests spent today, this run may spend {budget.limit}"
-        + ("" if held else " (another run holds this IP)"))
-    try:
-        yield budget
-    finally:
-        if held:
-            ledger = lake.read_json(BUDGET_KEY, {})
-            week_ago = (date.today() - timedelta(days=7)).isoformat()
-            days = {d: n for d, n in ledger.get(ip, {}).items() if d > week_ago}
-            days[today] = days.get(today, 0) + budget.spent
-            ledger[ip] = days
-            lake.write_json(BUDGET_KEY, ledger)
-            lake.delete(lock)
+def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int | None = None):
+    """pipeline.tapology.ip_budget with MMADecisions' own lock and ledger: a daily run spends
+    up to `max_requests`; a backfill passes `daily`, its shards' per-IP cap."""
+    return shared_ip_budget(lake, max_requests, minutes, daily, BUDGET_KEY, LOCK_PREFIX, "MMADecisions", log)
 
 
 def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
@@ -528,7 +505,8 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=MIN_INTERVAL,
                     help=f"seconds between request starts (default {MIN_INTERVAL}, floor {FLOOR_INTERVAL})")
     ap.add_argument("--max-requests", type=int, default=DAILY_BUDGET)
-    ap.add_argument("--daily-budget", type=int, default=DAILY_BUDGET, help="the per-IP daily cap; a backfill may raise it")
+    ap.add_argument("--daily-budget", type=int, default=DAILY_BUDGET,
+                    help="a backfill's per-IP daily cap, which it may raise; a daily run has none")
     ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES)
     ap.add_argument("--dry-run", action="store_true", help="crawl and archive locally; upload nothing")
     ap.add_argument("--backfill-plan", action="store_true", help="write the all-events plan from the 32 year pages")
@@ -548,7 +526,8 @@ def main() -> int:
     if args.replay:
         result = run(env, run_id, lake, None, args.interval, do_replay=True)
     else:
-        with ip_budget(lake, args.max_requests, args.max_minutes, args.daily_budget) as budget:
+        daily = args.daily_budget if args.backfill_plan or args.backfill_shards else None
+        with ip_budget(lake, args.max_requests, args.max_minutes, daily) as budget:
             result = run(env, run_id, lake, budget, args.interval, args.limit, args.backfill_plan,
                          args.backfill_shard, args.backfill_shards)
     shutil.rmtree(run_dir / "tables", ignore_errors=True)

@@ -10,11 +10,14 @@ is loaded:
 It writes to the environment's zone (pipeline/lake.py): DEV by default, PROD
 only on the Dagster+ production deployment or with FIGHTGRADE_ENV=prod.
 
-Each run spends at most pipeline.tapology.DAILY_BUDGET requests a day from its
-IP. What it cannot reach is queued in the lake and fetched by the next run.
+Each run spends at most pipeline.tapology.DAILY_BUDGET requests. What it cannot
+reach is queued in the lake and fetched by the next run. A run that stops before
+archiving anything (an IP the site refuses, or one another run holds) fails, and
+the crawl_retry sensor launches it again, usually onto another IP.
 
 A large backfill runs as parallel shards instead (one per egress IP; a run that
-lands on an IP another run holds stops before its first request):
+lands on an IP another run holds fails before its first request, and crawl_retry
+launches it again):
 
     1. backfill_until=YYYY-MM-DD           plan: the sitemap gap as one fixed list
     2. backfill_shard=k, backfill_shards=N  for each k, in parallel: fetch and upload
@@ -43,8 +46,8 @@ from .main_checkout import IN_DAGSTER_PLUS, dbt_project_for
 
 class TapologyCrawlConfig(Config):
     limit: int = 0                          # completed events (or bout pages) to keep; 0 = no cap
-    max_requests: int = tap.DAILY_BUDGET    # requests this run may spend, within today's budget for the IP
-    daily_budget: int = tap.DAILY_BUDGET    # the per-IP daily cap; a backfill may raise it
+    max_requests: int = tap.DAILY_BUDGET    # requests this run may spend
+    daily_budget: int = tap.DAILY_BUDGET    # a backfill's per-IP daily cap; a daily run has none
     sleep: float = tap.DEFAULT_SLEEP        # seconds between requests; 2.0 is the floor
     from_run: str = ""                      # re-process an archived run: no requests to Tapology
     title_bouts_since: str = ""             # YYYY-MM-DD: fetch missing title-bout pages instead
@@ -52,6 +55,17 @@ class TapologyCrawlConfig(Config):
     backfill_until: str = ""                # YYYY-MM-DD: write the backfill plan, fetch no events
     backfill_shard: int = -1                # with backfill_shards: fetch this shard of the plan
     backfill_shards: int = 0
+
+
+# What a run that stopped before archiving anything fails with. The crawl_retry
+# sensor (orchestration/__init__.py) relaunches only failures that carry it.
+RETRY_ON_ANOTHER_IP = "nothing fetched; a new run may land on another IP"
+
+
+def fail_if_nothing_fetched(result: dict) -> None:
+    """A stop with no page archived is a failed run, not a quiet green one."""
+    if result["stopped"] and not result.get("pages"):
+        raise Failure(f"{result['stopped']}: {RETRY_ON_ANOTHER_IP}")
 
 
 @contextmanager
@@ -88,10 +102,11 @@ def tapology_fetch(context: OpExecutionContext, config: TapologyCrawlConfig) -> 
             result = tap.rebuild(run_dir, env)
             known -= {e["event_slug"] for e in result["rows"]["event_details"]}
         else:
-            with tap.ip_budget(lake, config.max_requests, config.max_minutes, config.daily_budget) as budget:
+            daily = config.daily_budget if backfill or config.title_bouts_since else None
+            with tap.ip_budget(lake, config.max_requests, config.max_minutes, daily) as budget:
                 if backfill and budget.limit == 0:
-                    raise Failure("no budget on this egress IP (spent today, or another run holds it): "
-                                  "launch this shard again")
+                    raise Failure(f"no budget on this egress IP (spent today, or another run holds it): "
+                                  f"{RETRY_ON_ANOTHER_IP}")
                 if config.backfill_until:
                     result = tap.plan_backfill(lake, env, config.backfill_until, known, config.sleep, budget)
                 elif config.backfill_shards:
@@ -106,6 +121,7 @@ def tapology_fetch(context: OpExecutionContext, config: TapologyCrawlConfig) -> 
         context.log.warning(result["stopped"])
     context.add_output_metadata({"run_id": run_id, "env": env, **result["report"],
                                  **{f"rows_{t}": len(r) for t, r in result["rows"].items()}})
+    fail_if_nothing_fetched(result)
     if result.get("state"):
         context.log.info(f"{len(result['state']['queue'])} events queued for the next run")
     shard = config.backfill_shard if config.backfill_shards else None

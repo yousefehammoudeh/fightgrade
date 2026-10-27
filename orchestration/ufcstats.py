@@ -13,8 +13,8 @@ check. On Dagster+ Serverless the image (Dockerfile) carries Chrome and Xvfb,
 exactly as for Tapology.
 
 All of UFC Stats (~16,800 pages) runs as parallel shards, the tapology_crawl
-drill, one per egress IP (a run that lands on an IP another run holds stops
-before its first request):
+drill, one per egress IP (a run that lands on an IP another run holds fails
+before its first request, and the crawl_retry sensor launches it again):
 
     1. backfill_plan=true                   plan: every listed event and every fighter, ~28 requests
     2. backfill_shard=k, backfill_shards=N  for each k, in parallel: fetch and upload
@@ -41,13 +41,13 @@ from pipeline.lake import Lake, environment, new_run_id, zone
 
 from .dbt_cli import run_dbt
 from .main_checkout import IN_DAGSTER_PLUS, dbt_project_for
-from .tapology import crawler_log_to
+from .tapology import RETRY_ON_ANOTHER_IP, crawler_log_to, fail_if_nothing_fetched
 
 
 class UfcStatsCrawlConfig(Config):
     limit: int = 0                          # completed events to keep; 0 = no cap
-    max_requests: int = ufc.DAILY_BUDGET    # requests this run may spend, within today's budget for the IP
-    daily_budget: int = ufc.DAILY_BUDGET    # the per-IP daily cap; a backfill may raise it
+    max_requests: int = ufc.DAILY_BUDGET    # requests this run may spend
+    daily_budget: int = ufc.DAILY_BUDGET    # a backfill's per-IP daily cap; a daily run has none
     sleep: float = ufc.DEFAULT_SLEEP        # seconds between requests; ufc.MIN_SLEEP is the floor
     max_minutes: float = ufc.MAX_FETCH_MINUTES
     since: str = ufc.EXPORT_LAST_EVENT      # only events dated after this
@@ -78,10 +78,11 @@ def ufcstats_fetch(context: OpExecutionContext, config: UfcStatsCrawlConfig) -> 
             result = ufc.rebuild(run_dir, env)
             known -= {e["ufcstats_event_id"] for e in result["rows"]["ufcstats_events"]}
         else:
-            with ufc.ip_budget(lake, config.max_requests, config.max_minutes, config.daily_budget) as budget:
+            daily = config.daily_budget if backfill else None
+            with ufc.ip_budget(lake, config.max_requests, config.max_minutes, daily) as budget:
                 if backfill and budget.limit == 0:
-                    raise Failure("no budget on this egress IP (spent today, or another run holds it): "
-                                  "launch this shard again")
+                    raise Failure(f"no budget on this egress IP (spent today, or another run holds it): "
+                                  f"{RETRY_ON_ANOTHER_IP}")
                 if config.backfill_plan:
                     result = ufc.plan_backfill(lake, env, config.sleep, budget, known)
                 elif config.backfill_shards:
@@ -94,6 +95,7 @@ def ufcstats_fetch(context: OpExecutionContext, config: UfcStatsCrawlConfig) -> 
         context.log.warning(result["stopped"])
     context.add_output_metadata({"run_id": run_id, "env": env, **result["report"],
                                  **{f"rows_{t}": len(r) for t, r in result["rows"].items()}})
+    fail_if_nothing_fetched(result)
     shard = config.backfill_shard if config.backfill_shards else None
     return {"env": env, "run_id": run_id, "run_dir": str(run_dir), "result": result, "known": known,
             "backfill": backfill, "shard": shard}
