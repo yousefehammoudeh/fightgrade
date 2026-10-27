@@ -8,3 +8,13 @@ models:
       3 one name and a shared name, 4 one name) in the better of the two fighter orders.
     data_tests:
       - unique_columns: {arguments: {columns: [decision_id, ufcstats_fight_id]}}
+
+  - name: stg_mmadecisions_deductions
+    description: >
+      Point deductions per decision, as the page lists them unless
+      seeds/mmadecisions_deduction_overrides.csv replaces them. deduction_source
+      says which. Round scores include these points; add them back to read who
+      won the round.
+    columns:
+      - name: fighter_side
+        data_tests: [not_null]

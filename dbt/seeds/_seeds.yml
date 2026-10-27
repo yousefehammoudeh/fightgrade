@@ -28,3 +28,47 @@ seeds:
           - relationships: {arguments: {to: ref('cln_ufcstats_fights'), field: ufcstats_fight_id}}
       - name: source
         data_tests: [not_null]
+
+  - name: mmadecisions_deduction_overrides
+    description: >
+      Point deductions the MMADecisions page gets wrong or leaves out, found by
+      mmadecisions_round_scores_valid. A decision with rows here takes these in
+      place of the page's (stg_mmadecisions_deductions). fighter_side is the
+      decision's fighter order (1 = the winner). Every row names its source, and
+      the cards must agree with it: a deduction is never inferred from the cards alone.
+    config:
+      column_types:
+        decision_id: varchar
+        round: int
+        points: int
+        fighter_side: int
+        source: varchar
+        note: varchar
+    columns:
+      - name: decision_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+      - name: fighter_side
+        data_tests:
+          - accepted_values: {arguments: {values: [1, 2]}}
+      - name: source
+        data_tests: [not_null]
+
+  - name: mmadecisions_round_score_quarantine
+    description: >
+      Decisions whose per-round scores cannot be squared with what is known of the
+      fight, so no round of theirs is a training target. Their totals stand.
+    config:
+      column_types:
+        decision_id: varchar
+        source: varchar
+        note: varchar
+    columns:
+      - name: decision_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
+      - name: source
+        data_tests: [not_null]
