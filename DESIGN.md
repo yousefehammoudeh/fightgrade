@@ -714,8 +714,27 @@ was ±0.0066 and put 72 of 81 settings within it; paired, 10.
 | B | rank 2, M_z 800, M_108 1600 | Against the average judge: named judges −0.0019 ± 0.0006, overall −0.0017 ± 0.0006, 10-8 −0.0015 ± 0.0005. M_z 400–800 is an interior optimum; M_108 is flat, so the strongest shrinkage |
 | B | no gates | Run on both bases, since a term the average judge ignores could still matter to one judge; the gates' best (rank 4) is within one SE of no gates |
 
+| C | M_FAN 5 | Crowd log loss falls as M_FAN shrinks and plateaus at 0–5 (0.6508–0.6509), all within one SE; 10 and up are worse (1000: +0.0071 ± 0.0013). 5 keeps a one-fan round below a 300-fan one (weights 0.17 vs 0.98) |
+
 Judge styles earn their place, by a small margin: about 0.4% of log loss, 10-8 PR-AUC 0.445 →
-0.462. Stage C (M_FAN), the forward check and the locked test are still to run.
+0.462.
+
+**Forward check** (train 2010–22, score 2023–24; experiment `JUDGE_LENS_FORWARD`):
+
+| | Log loss | Named judges | Rare judges | Accuracy | Calibration error | 10-8 PR-AUC | Crowd |
+|---|---|---|---|---|---|---|---|
+| Pick (rank 2) | 0.4769 | 0.4706 | 0.5237 | 82.6% | 0.0215 | 0.497 | 0.6307 |
+| Average judge | 0.4781 | 0.4704 | 0.5317 | 82.7% | 0.0202 | 0.474 | 0.6308 |
+| Cross-validation, pick | 0.4754 | 0.4746 | 0.4851 | 82.8% | 0.0052 | 0.462 | 0.6509 |
+
+- **No meaningful log-loss drift:** 0.4769 against 0.4754. Rank 2 still beats the average judge.
+- **In 2023–24 the gain comes from rare judges and 10-8s,** not the named judges, which are flat.
+- **Calibration error rises fourfold, unevenly.** Mean confidence still equals accuracy (0.826),
+  but the model is too sure in the 80–90% band (predicted 0.855, actual 0.810, ~3 SE on 838
+  rounds) and too unsure on 2024's close rounds (0.549 against 0.631, 309 rounds). The confidence
+  slope moves from 1.03 to 0.93. The era buckets move only the 10-8 line, which already does better
+  forward than in CV, so they cannot fix it. Recorded as drift, not tuned on: the locked test refits
+  on 2010–24 and shows whether the newer rounds correct it.
 
 **Measured on every run, on held-out predictions only:**
 - **Overall:** log loss (selects), Brier, calibration error and a reliability curve for P(won
