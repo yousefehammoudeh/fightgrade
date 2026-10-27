@@ -5,7 +5,7 @@
 
 The zone is "" for PROD and "dev/" for DEV, mirroring the Snowflake split: each
 environment's stage reads only its own zone (terraform/snowflake_integration.tf),
-so a test crawl can never reach PROD's 03:00 build.
+so a test crawl can never reach PROD's build.
 
 The environment defaults to DEV everywhere except the Dagster+ production
 deployment. FIGHTGRADE_ENV=prod overrides it, for a deliberate PROD run from a

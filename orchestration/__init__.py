@@ -7,24 +7,24 @@ locally for development with:
 
 Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
 
-  dbt_prod_build   PROD = main. Daily at 03:00, or launched by hand from the UI
+  dbt_prod_build   PROD = main. After every successful crawl, by the
+                   build_after_crawl sensor, or launched by hand from the UI
                    for a rebuild now — optionally narrowed with `select`.
-  dbt_resync_dev   DEV = PROD, after every successful PROD build (the 03:00
-                   one, or one launched by hand), by the resync_dev sensor.
+  dbt_resync_dev   DEV = PROD, after every successful PROD build (one after a
+                   crawl, or one launched by hand), by the resync_dev sensor.
                    Zero-copy clones, so it takes seconds; it drops DEV-only
                    tables, so unmerged DEV work lasts until the next build.
   tapology_crawl   newly completed Tapology events -> lake -> LANDING
                    (orchestration/tapology.py). Daily at 02:00, Tapology's
                    quiet hour: its audience is ~41% US, then the UK and central
                    Europe, so 2 a.m. Eastern falls after US midnight and before
-                   Europe's morning. Its fetch stops by 02:30, so LANDING is
-                   loaded before the 03:00 build publishes it.
+                   Europe's morning. Its fetch stops by 02:30; the build
+                   after it publishes the day's events.
   ufcstats_crawl   newly completed UFC Stats events -> lake -> LANDING
                    (orchestration/ufcstats.py). Weekly, Sunday 06:00: UFC Stats
                    only follows the UFC, whose cards are on Saturdays, and a
                    US card ends ~01:00, so by 06:00 its results are posted.
-                   That is after the 03:00 build, so a card reaches the models
-                   with Monday's build. A different site from Tapology, its
+                   A different site from Tapology, its
                    own lock and its own LANDING tables. A UFC card is ~45
                    requests, ~3 min.
   mmadecisions_crawl  judges' decisions -> lake -> LANDING
@@ -38,7 +38,7 @@ launches it again with the same config: Serverless gives each run one of 3
 egress IPs, and MMADecisions refuses one of them.
 
 Schedules and the sensors run only on the Dagster+ production deployment.
-Locally they start stopped, so a laptop never races the cloud for the same 03:00
+Locally they start stopped, so a laptop never races the cloud for the same PROD
 build, and a branch deployment builds DEV instead of PROD.
 """
 from pathlib import Path
@@ -52,14 +52,17 @@ from dagster import (
     OpExecutionContext,
     RunRequest,
     RunFailureSensorContext,
+    RunsFilter,
     RunStatusSensorContext,
     ScheduleDefinition,
+    SensorEvaluationContext,
     SkipReason,
     in_process_executor,
     job,
     op,
     run_failure_sensor,
     run_status_sensor,
+    sensor,
 )
 
 from .dbt_cli import run_dbt
@@ -93,7 +96,7 @@ class ProdBuildConfig(Config):
     select: str = ""
     # Rebuild incremental tables from every file in the stage instead of
     # appending new ones — for a deliberate reload, e.g. after the lake's files
-    # were re-staged. Never set by the schedule.
+    # were re-staged. Never set by the build_after_crawl sensor.
     full_refresh: bool = False
 
 
@@ -160,15 +163,37 @@ def crawl_retry(context: RunFailureSensorContext):
                       tags={IP_RETRY_TAG: str(tries + 1)})
 
 
+IN_PROGRESS = [DagsterRunStatus.QUEUED, DagsterRunStatus.NOT_STARTED, DagsterRunStatus.STARTING,
+               DagsterRunStatus.STARTED, DagsterRunStatus.CANCELING]
+
+
+@sensor(job=dbt_prod_build, minimum_interval_seconds=60, default_status=SENSOR_STATUS)
+def build_after_crawl(context: SensorEvaluationContext):
+    """PROD = main after every successful crawl. Once no crawl and no build is in
+    progress, one build for the newest crawl that ended after the last build began.
+
+    The wait matters: a full build runs the LANDING models too, and one that runs
+    while a crawl loads the same tables inserts that crawl's new files twice.
+    Crawls that end close together (Sunday's two) share one build."""
+    instance = context.instance
+    for j in (*CRAWLS, dbt_prod_build):
+        for busy in instance.get_run_records(RunsFilter(job_name=j.name, statuses=IN_PROGRESS), limit=1):
+            return SkipReason(f"waiting for {j.name} {busy.dagster_run.run_id[:8]}")
+    ended = [r for j in CRAWLS
+             for r in instance.get_run_records(RunsFilter(job_name=j.name, statuses=[DagsterRunStatus.SUCCESS]),
+                                               limit=1)]
+    if not ended:
+        return SkipReason("no crawl has succeeded yet")
+    crawl = max(ended, key=lambda r: r.end_time or 0)
+    build = next(iter(instance.get_run_records(RunsFilter(job_name=dbt_prod_build.name), limit=1)), None)
+    if build and (build.start_time or 0) >= (crawl.end_time or 0):
+        return SkipReason(f"PROD built since {crawl.dagster_run.job_name} {crawl.dagster_run.run_id[:8]}")
+    return RunRequest(run_key=f"after-{crawl.dagster_run.run_id}")
+
+
 defs = Definitions(
     jobs=[dbt_prod_build, dbt_resync_dev, *CRAWLS],
     schedules=[
-        ScheduleDefinition(
-            job=dbt_prod_build,
-            cron_schedule="0 3 * * *",
-            execution_timezone=TIMEZONE,
-            default_status=SCHEDULE_STATUS,
-        ),
         ScheduleDefinition(
             job=tapology_crawl,
             cron_schedule=DAILY_0200,
@@ -188,5 +213,5 @@ defs = Definitions(
             default_status=SCHEDULE_STATUS,
         ),
     ],
-    sensors=[resync_dev, crawl_retry],
+    sensors=[resync_dev, crawl_retry, build_after_crawl],
 )
