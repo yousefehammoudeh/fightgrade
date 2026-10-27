@@ -674,7 +674,7 @@ def egress_ip() -> str:
 
 @contextmanager
 def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int | None = None,
-              budget_key: str = BUDGET_KEY, lock_prefix: str = LOCK_PREFIX, site: str = "Tapology"):
+              budget_key: str = BUDGET_KEY, lock_prefix: str = LOCK_PREFIX, site: str = "Tapology", say=None):
     """The run's request budget on its egress IP, recorded in the lake's ledger after
     the run whether it finished or not: a request spent is spent.
 
@@ -686,7 +686,8 @@ def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES,
     A daily run may spend `max_requests`, whatever the IP spent earlier today. A
     backfill passes `daily`, the per-IP cap its shards share: what the ledger holds
     for today comes off it, so a shard relaunched on the same IP stays within it.
-    Each site keeps its own lock and ledger (`lock_prefix`, `budget_key`)."""
+    Each site keeps its own lock and ledger (`lock_prefix`, `budget_key`), and logs
+    through its own `say`, which the orchestration points at the run's log."""
     ip, today = egress_ip(), date.today().isoformat()
     lock = f"{lock_prefix}{ip}.json"
     held = lake.create(lock, {"since": time.time()})
@@ -700,7 +701,7 @@ def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES,
         budget = Budget(max_requests, minutes)
     else:
         budget = Budget(max(min(max_requests, daily - spent), 0), minutes, "daily budget spent")
-    log(f"egress IP {ip}: {spent} {site} requests spent today"
+    (say or log)(f"egress IP {ip}: {spent} {site} requests spent today"
         + ("" if daily is None else f" of the backfill's {daily}") + f", this run may spend {budget.limit}"
         + ("" if held else " (another run holds this IP)"))
     try:

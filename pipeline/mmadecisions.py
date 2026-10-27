@@ -406,7 +406,7 @@ def backfill_shard(lake: Lake, env: str, run_dir: Path, interval: float, budget:
 def ip_budget(lake: Lake, max_requests: int, minutes: float = MAX_FETCH_MINUTES, daily: int | None = None):
     """pipeline.tapology.ip_budget with MMADecisions' own lock and ledger: a daily run spends
     up to `max_requests`; a backfill passes `daily`, its shards' per-IP cap."""
-    return shared_ip_budget(lake, max_requests, minutes, daily, BUDGET_KEY, LOCK_PREFIX, "MMADecisions")
+    return shared_ip_budget(lake, max_requests, minutes, daily, BUDGET_KEY, LOCK_PREFIX, "MMADecisions", log)
 
 
 def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
