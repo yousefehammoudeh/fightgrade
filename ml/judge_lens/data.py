@@ -13,7 +13,8 @@ LABELS = ["p_7_10", "p_8_10", "p_9_10", "p_10_10", "p_10_9", "p_10_8", "p_10_7"]
 QUERY = f"""
 select
     j.ufcstats_fight_id, j.round, j.rater_key, j.rater_kind, j.rater_id, j.rater_name,
-    j.decision_id, j.event_date, j.period, j.cv_fold, j.margin, j.label_weight, fa.name as fighter_a_name,
+    j.decision_id, j.ufcstats_event_id, j.event_date, j.period, j.cv_fold, j.margin, j.label_weight,
+    j.fighter_a_id, fa.name as fighter_a_name,
     {", ".join(f"j.{c}" for c in LABELS)},
     {", ".join(f"a.{c} as a_{c}" for c in STATS)},
     {", ".join(f"b.{c} as b_{c}" for c in STATS)}

@@ -3,10 +3,17 @@
     mode 'cv'       five folds over period 'select' (2010-22), grouped by event
     mode 'forward'  train on 'select', score 'forward' (2023-24)
     mode 'test'     train on 'select' and 'forward', score 'test' (2025-26): once
+    mode 'fit'      the retrain: CHOSEN on every usable row, gated on a backtest of
+                    the newest HOLDOUT_DAYS, registered as a version of ML.JUDGE_LENS
+                    and made the default if the gate passes
+    mode 'log'      the prospective test: every usable round not logged yet, predicted
+                    through the registry by the newest version that passed its gate
+                    and never trained on it, appended to ML.JUDGE_LENS_PREDICTIONS
 
-main() is the handler of the ML.TRAIN_JUDGE_LENS stored procedure: it runs one
-mode over one or more hyperparameter settings and logs each as a run in Snowflake
-Experiments. Locally, against DEV and without Experiments:
+The training job runs 'log' before 'fit', so a new card is scored by the version
+that existed before it. main() is the handler of the ML.TRAIN_JUDGE_LENS stored
+procedure: cv/forward/test run one or more hyperparameter settings and log each
+as a run in Snowflake Experiments. Locally, against DEV and without Experiments:
 
     .venv/bin/python -m ml.judge_lens.train --mode cv --params '{"rank": 2}'
 """
@@ -29,6 +36,15 @@ TEST_FIGHTS = {"13677": "Pimblett def. Gordon", "13556": "O'Malley def. Yan", "1
 NAMED_MIN_ROUNDS = 300      # the named judges: this many usable rounds in 2010-24
 FEW_ROUNDS = 100            # judges below this are reported apart
 SE_METRICS = ["log_loss", "log_loss_named", "log_loss_10_8", "crowd_log_loss"]   # what each stage selects on
+
+# The settings the protocol chose on 2026-10-27 (DESIGN.md §8); the retrain keeps
+# them until the grids are run again.
+CHOSEN = {"knots": 3, "interactions": "none", "era": "rules2017", "l2_beta": 10.0,
+          "rank": 2, "m_z": 800.0, "m_108": 1600.0, "m_fan": 5.0, "seed": 0}
+HOLDOUT_DAYS = 365          # the retrain's backtest: fit before these days, score them
+GATE = {"max_calibration_error": 0.035,     # the locked test came out at 0.020
+        "max_loss_over_average": 0.002}     # judge styles may not make it worse than the average judge
+PREDICTIONS = "ML.JUDGE_LENS_PREDICTIONS"
 
 
 def add_flags(df: pd.DataFrame) -> pd.DataFrame:
@@ -118,6 +134,126 @@ def run_name(params: dict, mode: str) -> str:
     return f"{mode}_r{params['rank']}_k{params['knots']}_{params['interactions']}_{tag}_{int(time.time())}"
 
 
+def registry_input(df: pd.DataFrame, as_average: bool = False) -> pd.DataFrame:
+    """The registry model's input columns for these rows."""
+    from .registry import INPUTS
+    x = df.copy()
+    x["rater_id"] = AVERAGE if as_average else pd.Series(raters(df), index=df.index).fillna(AVERAGE).astype(str)
+    x["year"] = x["year"].astype(np.int64)
+    return x[INPUTS]
+
+
+def backtest(df: pd.DataFrame, p: dict) -> dict:
+    """The gate's evidence: fit before the newest HOLDOUT_DAYS, score those days,
+    beside the average judge from the same fit, with the fighter swap checked."""
+    dates = pd.to_datetime(df["event_date"])
+    end = dates.max()
+    start = end - pd.Timedelta(days=HOLDOUT_DAYS)
+    train, hold = df[dates < start], df[dates >= start]
+    basis, model = fit(train, p)
+    P, A = predict(basis, model, hold), predict(basis, model, hold, as_average=True)
+    swapped = hold.copy()
+    for c in data.STATS:
+        swapped[f"a_{c}"], swapped[f"b_{c}"] = hold[f"b_{c}"].to_numpy(), hold[f"a_{c}"].to_numpy()
+    mirror = float(np.abs(P - predict(basis, model, swapped)[:, ::-1]).max())
+    return {"model": evaluate(P, hold), "average": evaluate(A, hold), "mirror": mirror,
+            "holdout": [str(start.date()), str(end.date())]}
+
+
+def gate(bt: dict) -> list[str]:
+    """Why a fit may not become the default; empty when it may."""
+    m, avg, failures = bt["model"], bt["average"], []
+    if bt["mirror"] > 1e-9:
+        failures.append(f"swapping the fighters does not mirror the probabilities ({bt['mirror']:.1e})")
+    if m["calibration_error"] > GATE["max_calibration_error"]:
+        failures.append(f"calibration error {m['calibration_error']:.4f} over {GATE['max_calibration_error']}")
+    if m["log_loss"] > avg["log_loss"] + GATE["max_loss_over_average"]:
+        failures.append(f"log loss {m['log_loss']:.4f} worse than the average judge's {avg['log_loss']:.4f}")
+    return failures
+
+
+def fit_and_register(session, df: pd.DataFrame, config: dict, exp) -> dict:
+    """mode 'fit': backtest and gate, fit on everything, register, maybe promote."""
+    from . import checks, registry
+
+    checks.run_all()
+    p = {**CHOSEN, **config.get("params", {})}
+    if config.get("train_through"):     # a version as it would have been then: rehearses the prospective log
+        df = df[pd.to_datetime(df["event_date"]) <= pd.Timestamp(config["train_through"])]
+    through = str(pd.to_datetime(df["event_date"]).max().date())
+    version = f"V{through.replace('-', '')}_{len(df)}"      # the data it saw: no new rows, no new version
+    if version in registry.versions(session):
+        return {"mode": "fit", "version": version, "registered": False, "reason": "already registered"}
+    bt = backtest(df, p)
+    failures = gate(bt)
+    basis, model = fit(df, p)
+    metrics = {**{f"holdout_{k}": v for k, v in bt["model"].items()},
+               **{f"holdout_average_{k}": bt["average"][k] for k in ("log_loss", "calibration_error", "accuracy")}}
+    meta = {"train_through": through, "rows": len(df), "params": p, "holdout": bt["holdout"],
+            "gate_failures": failures}
+    promote = bool(config.get("promote", True)) and not failures
+    registry.log_version(session, basis, model, registry.sample_input(registry_input(df)), version,
+                         metrics, meta, promote)
+    exp.set_experiment("JUDGE_LENS_FIT")
+    run = f"{version}_{int(time.time())}"      # a version can be fitted again after it is dropped
+    exp.start_run(run)
+    exp.log_params({**p, "rows": len(df), "train_through": through, "promoted": promote, "version": version})
+    exp.log_metrics({k: v for k, v in metrics.items() if v is not None and np.isfinite(v)})
+    exp.end_run(run)
+    clean = {k: (v if v is None or np.isfinite(v) else None) for k, v in metrics.items()}
+    return {"mode": "fit", "version": version, "registered": True, "promoted": promote,
+            "gate_failures": failures, "train_through": through, "holdout": bt["holdout"], "metrics": clean}
+
+
+def newest_unseen(event_dates: pd.Series, passed: list[tuple[str, str]]) -> pd.Series:
+    """Per round, the newest gated version trained only on earlier events (None if
+    there is none): a card is always scored by a version that never saw it, even
+    when its decisions arrive after a newer version has trained."""
+    dates = pd.to_datetime(event_dates)
+    out = pd.Series([None] * len(dates), index=dates.index, dtype=object)
+    for name, through in passed:            # oldest first, so the newest that fits wins
+        out[dates > pd.Timestamp(through)] = name
+    return out
+
+
+def log_predictions(session, df: pd.DataFrame) -> dict:
+    """mode 'log': every usable round not logged yet, predicted through the registry
+    by the newest version that passed its gate and never trained on it."""
+    from . import registry
+
+    passed = registry.passed_versions(session)
+    if not passed:
+        return {"mode": "log", "logged": 0, "reason": "no version has passed its gate yet"}
+    session.sql(f"""create table if not exists {PREDICTIONS} (
+        model_version varchar, predicted_at timestamp_ltz, ufcstats_fight_id varchar, ufcstats_event_id varchar,
+        event_date date, decision_id varchar, round int, rater_key varchar, rater_kind varchar, rater_id varchar,
+        rater_name varchar, fighter_a_id varchar,
+        {", ".join(f"{c} float" for c in LABELS)}, p_a_wins float, average_judge_p_a_wins float)""").collect()
+    done = {tuple(r) for r in session.sql(f"select ufcstats_fight_id, round, rater_key from {PREDICTIONS}").collect()}
+    new = df[[(f, int(r), k) not in done for f, r, k in zip(df["ufcstats_fight_id"], df["round"], df["rater_key"])]]
+    new = new.assign(model_version=newest_unseen(new["event_date"], passed))
+    new = new[new["model_version"].notna()]
+    if new.empty:
+        return {"mode": "log", "logged": 0, "newest": passed[-1][0]}
+    logged = []
+    for name, part in new.groupby("model_version"):
+        mv = registry.version(session, name)
+        out = mv.run(registry_input(part), function_name="predict")
+        avg = mv.run(registry_input(part, as_average=True), function_name="predict")
+        rows = part[["model_version", "ufcstats_fight_id", "ufcstats_event_id", "event_date", "decision_id", "round",
+                     "rater_key", "rater_kind", "rater_id", "rater_name", "fighter_a_id"]].reset_index(drop=True)
+        rows.insert(1, "predicted_at", pd.Timestamp.now(tz="UTC"))
+        for c in [*LABELS, "p_a_wins"]:
+            rows[c] = out[c.upper() if c.upper() in out.columns else c].to_numpy(float)
+        rows["average_judge_p_a_wins"] = avg["P_A_WINS" if "P_A_WINS" in avg.columns else "p_a_wins"].to_numpy(float)
+        rows["event_date"] = pd.to_datetime(rows["event_date"]).dt.date
+        rows.columns = [c.upper() for c in rows.columns]
+        session.write_pandas(rows, PREDICTIONS.split(".")[1], schema="ML", auto_create_table=False,
+                             overwrite=False, use_logical_type=True)
+        logged.append({"version": name, "rows": len(rows), "events": sorted(map(str, rows["EVENT_DATE"].unique()))})
+    return {"mode": "log", "logged": sum(x["rows"] for x in logged), "by_version": logged}
+
+
 def main(session, config: dict) -> dict:
     """ML.TRAIN_JUDGE_LENS(config): {"mode": ..., "experiment": ..., "configs": [params, ...]}.
     Each setting is a run in Snowflake Experiments in the current database's ML schema."""
@@ -125,9 +261,14 @@ def main(session, config: dict) -> dict:
 
     mode = config.get("mode", "cv")
     settings = config.get("configs") or [config.get("params", {})]
+    session.use_schema("ML")        # the registry's runs stage temporary tables in the current schema
     df = add_flags(data.from_snowpark(session))
+    if mode == "log":
+        return log_predictions(session, df)
     exp = ExperimentTracking(session=session, database_name=session.get_current_database().strip('"'),
                              schema_name="ML")
+    if mode == "fit":
+        return fit_and_register(session, df, config, exp)
     exp.set_experiment(config.get("experiment", f"JUDGE_LENS_{mode.upper()}"))
     runs = []
     for params in settings:

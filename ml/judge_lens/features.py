@@ -81,3 +81,9 @@ class Basis:
     def state(self) -> dict:
         return {"knots": self.knots, "interactions": self.interactions, "knot_at": self.knot_at,
                 "scale": self.scale.tolist(), "names": self.names}
+
+    @classmethod
+    def from_state(cls, s: dict) -> "Basis":
+        b = cls(s["knots"], s["interactions"])
+        b.knot_at, b.scale, b.names = s["knot_at"], np.asarray(s["scale"], float), s["names"]
+        return b

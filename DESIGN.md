@@ -736,6 +736,53 @@ Judge styles earn their place, by a small margin: about 0.4% of log loss, 10-8 P
   forward than in CV, so they cannot fix it. Recorded as drift, not tuned on: the locked test refits
   on 2010–24 and shows whether the newer rounds correct it.
 
+**Locked test, opened once on 2026-10-27** (train 2010–24, score 2025–26; experiment
+`JUDGE_LENS_TEST`): **log loss 0.4346, accuracy 83.9%** against the sig-strike rule's 76.4%, and
+calibration error 0.020. The average judge scores 0.4351 and 83.8%. The judge styles barely carry
+forward (−0.0005 overall; the named judges are flat). What holds up is 10-8 (PR-AUC 0.452 against
+0.427) and rare judges (0.4205 against 0.4240). The calibration drift did not correct itself.
+
+**Learning curve** (cross-validation on nested shares of 2010–22's fights): the average judge is
+flattening (75% → 100% of the fights gains 0.0007 ± 0.0008), while rank 2 is still improving
+(0.0012 ± 0.0008). Rank 2's edge over the average judge grows with data: +0.0004 at 25% (styles
+hurt), −0.0008 at 50%, −0.0012 at 75%, −0.0017 at 100%. More decisions pay off mainly through
+sharper judge styles.
+
+### Retraining and the prospective test
+
+The judge model improves as decisions arrive without anyone touching it:
+
+- **Shrinkage does the per-judge part.** A judge's style is pulled toward the average judge as if
+  they had M_z = 800 more average rounds, so a judge with 100 rounds is 89% the average judge and
+  one with 1,000 is 44%. As rounds accumulate, judges become themselves, and new ones cross the
+  300-round line into named profiles.
+- **`judge_lens_train`** (`orchestration/judge_lens.py`) runs after every successful PROD build. It
+  deploys `ML.TRAIN_JUDGE_LENS` from main, then:
+  1. **log:** every usable round not logged yet, predicted through the registry by the newest
+     version that passed its gate and never trained on it, into `ML.JUDGE_LENS_PREDICTIONS`.
+     Decisions that arrive days after a card are still scored by a version from before it.
+  2. **fit:** with the chosen settings fixed, a version named for the data it saw
+     (`V<last event date>_<rows>`); with no new rows it does nothing. It backtests the newest 365
+     days (fit before them, score them), registers a version of `ML.JUDGE_LENS` with those metrics,
+     and makes it the default only if the gate passes: the fighter swap mirrors, calibration error
+     ≤ 0.035, and log loss no worse than the average judge's from the same fit plus 0.002. A version
+     that fails is registered for the record, the default stays, and the job fails loudly.
+- **The prospective log is the test that never runs out.** The locked test was spent once; from
+  here, "does it get better?" is the log loss and calibration of the logged predictions, card by
+  card. Rehearsed in DEV: a version trained through 2026-09-26 scored October's four cards blind,
+  at 79.7% accuracy and log loss 0.426 over 138 judge rounds (average judge 79.0%).
+- **Re-tuning is occasional:** stages A–C again quarterly, or after about 2,000 new judge-rounds.
+  The grids cost about an hour and, run weekly, would overfit the choice.
+- **Watch the calibration.** The newest year's backtest is at 0.032, close to the 0.035 bar.
+  Recency weighting (a time-decay weight on training rows, as a hyperparameter) is the next
+  candidate for the grid if the bar starts to bite.
+
+From SQL, any version or the default:
+
+```sql
+select MODEL(ML.JUDGE_LENS)!predict(rater_id, year, a_knockdowns, ..., b_ctrl_seconds):p_a_wins
+```
+
 **Measured on every run, on held-out predictions only:**
 - **Overall:** log loss (selects), Brier, calibration error and a reliability curve for P(won
   round) and for P(10-8), accuracy.

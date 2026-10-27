@@ -198,6 +198,13 @@ class JudgeLens:
     def state(self) -> dict:
         """Everything predict() needs, as plain lists: the registry's model and the
         fallback coefficients table are both built from this."""
-        B = self.p["B_raw"] / np.linalg.norm(self.p["B_raw"], axis=0) if self.rank else 0 * self.p["B_raw"]
-        return {"rank": self.rank, "era": self.era, "judges": list(self.judges), "B": B.tolist(),
-                **{k: self.p[k].tolist() for k in ("beta", "a", "e", "Z", "c", "delta", "c_crowd")}}
+        return {"rank": self.rank, "era": self.era, "judges": list(self.judges),
+                "hyper": {"m_z": self.m_z, "m_108": self.m_108, "m_fan": self.m_fan, "l2_beta": self.l2_beta},
+                **{k: self.p[k].tolist() for k in ("beta", "a", "e", "B_raw", "Z", "c", "delta", "c_crowd")}}
+
+    @classmethod
+    def from_state(cls, s: dict) -> "JudgeLens":
+        m = cls(rank=s["rank"], era=s["era"], **s["hyper"])
+        m.judges = {r: i for i, r in enumerate(s["judges"])}
+        m.p = {k: np.asarray(s[k], float) for k in ("beta", "a", "e", "B_raw", "Z", "c", "delta", "c_crowd")}
+        return m

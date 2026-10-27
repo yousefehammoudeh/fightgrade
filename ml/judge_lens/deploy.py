@@ -13,8 +13,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .checks import run_all
-
 PACKAGE = Path(__file__).resolve().parent
 RUNTIME = "3.13"
 PACKAGES = ["snowflake-snowpark-python", "snowflake-ml-python==2.6.0", "pandas==2.3.3", "numpy==2.5.4",
@@ -22,9 +20,13 @@ PACKAGES = ["snowflake-snowpark-python", "snowflake-ml-python==2.6.0", "pandas==
 PROCEDURE = "ML.TRAIN_JUDGE_LENS"
 
 
-def deploy(cur, env: str) -> None:
-    """Check the model, upload the package and (re)create the procedure in FIGHTGRADE_<ENV>."""
-    run_all()
+def deploy(cur, env: str, check: bool = True) -> None:
+    """Check the model, upload the package and (re)create the procedure in FIGHTGRADE_<ENV>.
+    The training job passes check=False: its image has no numpy or scipy, and mode
+    'fit' runs the same checks inside the procedure."""
+    if check:
+        from .checks import run_all     # numpy and scipy: a laptop's, not the Dagster image's
+        run_all()
     cur.execute(f"use database FIGHTGRADE_{env.upper()}")
     cur.execute("create stage if not exists ML.CODE comment = 'Judge Lens training code (ml/judge_lens)'")
     with tempfile.TemporaryDirectory() as tmp:

@@ -5,7 +5,6 @@ hard call; crowd rows on the fans' distribution.
 """
 import numpy as np
 import pandas as pd
-from sklearn.metrics import average_precision_score
 
 from .data import LABELS
 
@@ -27,6 +26,8 @@ def calibration_error(p: np.ndarray, y: np.ndarray, bins: int = 10) -> float:
 
 
 def evaluate(P: np.ndarray, df: pd.DataFrame) -> dict[str, float]:
+    from sklearn.metrics import average_precision_score   # not at the top: the registry's model imports this module
+
     Y = df[LABELS].to_numpy(float)
     ll = soft_log_loss(P, Y)
     judge = (df["rater_kind"] == "judge").to_numpy()
