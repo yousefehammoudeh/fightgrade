@@ -23,6 +23,9 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    (orchestration/ufcstats.py). Daily at 02:00 beside
                    tapology_crawl: a different site, its own IP budget and
                    its own LANDING tables. A UFC card is ~45 requests, ~3 min.
+  mmadecisions_crawl  judges' decisions -> raw HTML in the lake
+                   (orchestration/mmadecisions.py). Daily at 02:00; no
+                   LANDING load until the decision-page extractor exists.
 
 Schedules and the sensor run only on the Dagster+ production deployment.
 Locally they start stopped, so a laptop never races the cloud for the same 03:00
@@ -49,6 +52,7 @@ from dagster import (
 from .dbt_cli import run_dbt
 from .main_checkout import IN_DAGSTER_PLUS, IS_BRANCH_DEPLOYMENT, main_dbt_project
 from .tapology import tapology_crawl
+from .mmadecisions import mmadecisions_crawl
 from .ufcstats import ufcstats_crawl
 
 TIMEZONE = "America/Toronto"
@@ -116,7 +120,7 @@ def resync_dev(context: RunStatusSensorContext) -> RunRequest:
 
 
 defs = Definitions(
-    jobs=[dbt_prod_build, dbt_resync_dev, tapology_crawl, ufcstats_crawl],
+    jobs=[dbt_prod_build, dbt_resync_dev, tapology_crawl, ufcstats_crawl, mmadecisions_crawl],
     schedules=[
         ScheduleDefinition(
             job=dbt_prod_build,
@@ -132,6 +136,12 @@ defs = Definitions(
         ),
         ScheduleDefinition(
             job=ufcstats_crawl,
+            cron_schedule="0 2 * * *",
+            execution_timezone=TIMEZONE,
+            default_status=SCHEDULE_STATUS,
+        ),
+        ScheduleDefinition(
+            job=mmadecisions_crawl,
             cron_schedule="0 2 * * *",
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
