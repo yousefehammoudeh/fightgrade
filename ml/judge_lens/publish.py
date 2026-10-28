@@ -15,8 +15,15 @@ in the environment's ML schema; the PUBLISHED dbt models are views over them.
     ML.JUDGE_LENS_FIGHTERS  per fighter: decisions won against what an average panel
                             would have given (decision luck)
 
-In sample: the version has trained on these fights. ML.JUDGE_LENS_PREDICTIONS is
-the out-of-sample record. Fight-level numbers come from panel.py's shared effects.
+Every decision with both fighters' round stats and control tracked is scored
+(data.SCORING_QUERY), whatever the year and whether or not the judges' round scores
+are known: the model needs only the stats, and a judge's card is their total. Each
+fight says whether the version trained on any of it (trained_on): the ones it did
+not, mostly before 2010, are an honest test. ML.JUDGE_LENS_PREDICTIONS is the
+prospective record. Fight-level numbers come from panel.py's shared effects.
+
+PUBLISH_FORMAT is stamped on every row: 'publish' rewrites the tables when it
+changes, not only when the default version does.
 """
 import zlib
 
@@ -33,6 +40,7 @@ GROUPS = {"kd": "knockdowns", "td": "takedowns", "ctrl": "control", "sub": "sub_
 GROUP_NAMES = ["strikes_landed", "control", "takedowns", "non_sig_strikes", "knockdowns", "sub_attempts",
                "strike_volume", "reversals"]
 POOL_YEARS, POOL_MIN_ROUNDS, N_PANELS = 3, 100, 400
+PUBLISH_FORMAT = 2          # 2: every decision with complete stats, cards from judges' totals
 
 
 def group_of(term: str) -> str:
@@ -49,10 +57,15 @@ def contributions(basis, model, rows: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({f"contrib_{g}": c[:, groups == g].sum(1) for g in GROUP_NAMES}, index=rows.index)
 
 
+def in_training(df: pd.DataFrame) -> pd.Series:
+    """The rows data.QUERY trains on: usable and from 2010."""
+    return df["exclusion_reason"].isna() & (df["year"] >= 2010)
+
+
 def judge_pool(judges: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """The judges random panels are drawn from: POOL_MIN_ROUNDS+ in the last
-    POOL_YEARS, weighted by their rounds, as panels are filled."""
-    recent = judges[judges["year"] > judges["year"].max() - POOL_YEARS].dropna(subset=["rater_id"])
+    """The judges random panels are drawn from: POOL_MIN_ROUNDS+ scored rounds in
+    the last POOL_YEARS, weighted by their rounds, as panels are filled."""
+    recent = judges[(judges["year"] > judges["year"].max() - POOL_YEARS) & judges["margin"].notna()].dropna(subset=["rater_id"])
     n = recent.groupby("rater_id").size()
     n = n[n >= POOL_MIN_ROUNDS]
     return n.index.to_numpy(object), (n / n.sum()).to_numpy()
@@ -64,11 +77,13 @@ def rounds_table(df: pd.DataFrame, basis, model, version: str) -> pd.DataFrame:
     A = model.predict(basis.transform(df), np.full(len(df), AVERAGE, dtype=object), df["year"].to_numpy())
     keys = ["decision_id", "ufcstats_fight_id", "ufcstats_event_id", "event_date", "round", "fighter_a_id", "fighter_b_id"]
     out = df[[*keys, "rater_key", "rater_kind", "rater_id", "rater_name", "margin"]].copy()
+    out["in_training"] = in_training(df).to_numpy()
     out[LABELS] = P
     out["p_a_wins"], out["p_10_8_plus"], out["average_judge_p_a_wins"] = win_prob(P), P[:, [0, 1, 5, 6]].sum(1), win_prob(A)
     a_share = df[LABELS[4:]].sum(1) / (df[LABELS[:3]].sum(1) + df[LABELS[4:]].sum(1))
-    out["actual_p_a_wins"] = np.where(df["rater_kind"] == "judge", (df["margin"] > 0).astype(float), a_share)
-    called = (df["rater_kind"] == "judge") & (df["margin"] != 0)
+    judge_call = np.where(df["margin"].isna(), np.nan, (df["margin"] > 0).astype(float))   # NaN: round score not recorded
+    out["actual_p_a_wins"] = np.where(df["rater_kind"] == "judge", judge_call, a_share)
+    called = (df["rater_kind"] == "judge") & df["margin"].notna() & (df["margin"] != 0)
     side_own, side_avg = np.where(df["margin"] > 0, win_prob(P), 1 - win_prob(P)), np.where(df["margin"] > 0, win_prob(A), 1 - win_prob(A))
     out["p_call"] = np.where(called, side_own, np.nan)                 # how likely the call made was, for this judge
     out["p_call_average"] = np.where(called, side_avg, np.nan)         # and for the average judge
@@ -76,6 +91,7 @@ def rounds_table(df: pd.DataFrame, basis, model, version: str) -> pd.DataFrame:
     A_avg = model.predict(basis.transform(avg), np.full(len(avg), AVERAGE, dtype=object), avg["year"].to_numpy())
     rows = avg[keys].copy()
     rows["rater_key"], rows["rater_kind"], rows["rater_id"], rows["rater_name"], rows["margin"] = "average", "average", AVERAGE, "Average judge", np.nan
+    rows["in_training"] = False
     rows[LABELS] = A_avg
     rows["p_a_wins"], rows["p_10_8_plus"], rows["average_judge_p_a_wins"] = win_prob(A_avg), A_avg[:, [0, 1, 5, 6]].sum(1), win_prob(A_avg)
     rows["actual_p_a_wins"] = rows["p_call"] = rows["p_call_average"] = np.nan
@@ -96,9 +112,9 @@ def fight_tables(df: pd.DataFrame, basis, model, version: str) -> dict[str, pd.D
     for did, g in judges.groupby("decision_id"):
         rounds = g.drop_duplicates("round").sort_values("round")
         R = len(rounds)
-        seats = sorted(g["rater_key"].unique())
-        if len(seats) != 3 or len(g) != 3 * R or list(rounds["round"]) != list(range(1, R + 1)):
-            continue                                    # the fight needs every judge's every round
+        seats = sorted(g.loc[g["total_a"].notna(), "rater_key"].unique())   # judges whose card is in points
+        if len(seats) != 3 or list(rounds["round"]) != list(range(1, R + 1)):
+            continue                                    # three cards, and stats for every round
         seat_rows = [g[g["rater_key"] == s].sort_values("round") for s in seats]
         seat_rater = [r["rater_id"].iloc[0] if isinstance(r["rater_id"].iloc[0], str) else AVERAGE for r in seat_rows]
         cand = list(dict.fromkeys([*seat_rater, *pool, AVERAGE, CROWD]))
@@ -112,12 +128,14 @@ def fight_tables(df: pd.DataFrame, basis, model, version: str) -> dict[str, pd.D
         average = panel.panel_probs(card, np.array([[at[AVERAGE]] * 3]))[0]
         crowd = card[:, at[CROWD]].mean(0)
         rp = panel.panel_probs(card, np.array([[at[pool[i]] for i in p] for p in random_panels]))
-        totals = [int((r["score_a"] - r["score_b"]).sum()) for r in seat_rows]
+        totals = [int(r["total_a"].iloc[0] - r["total_b"].iloc[0]) for r in seat_rows]   # the card as handed in
         a_cards, b_cards = sum(t > 0 for t in totals), sum(t < 0 for t in totals)
         first = rounds.iloc[0]
         fights.append({"decision_id": did, "ufcstats_fight_id": first["ufcstats_fight_id"], "ufcstats_event_id": first["ufcstats_event_id"],
                        "event_date": first["event_date"], "fighter_a_id": first["fighter_a_id"], "fighter_b_id": first["fighter_b_id"],
                        "rounds": R, "deducted_a": rounds["deducted_a"].fillna(0).sum(), "deducted_b": rounds["deducted_b"].fillna(0).sum(),
+                       "trained_on": bool(in_training(g).any()), "before_training_years": bool(first["year"] < 2010),
+                       "judges_with_rounds": sum(bool(r["margin"].notna().any()) for r in seat_rows),
                        "result": "A" if a_cards > b_cards else ("B" if b_cards > a_cards else "draw"),
                        "p_a_wins": real[0], "p_draw": real[1], "p_b_wins": real[2],
                        **{f"p_{k}": v for k, v in panel.decision_types(card, seat_idx).items()},
@@ -216,11 +234,14 @@ def fighters_table(fights: pd.DataFrame, df: pd.DataFrame, version: str) -> pd.D
     return L
 
 
-def build(df: pd.DataFrame, basis, model, version: str) -> dict[str, pd.DataFrame]:
-    rounds = rounds_table(df, basis, model, version)
-    tables = {"ROUNDS": rounds, **fight_tables(df, basis, model, version)}
-    tables["JUDGES"] = judges_table(df, basis, model, rounds, version)
-    tables["FIGHTERS"] = fighters_table(tables["FIGHTS"], df, version)
+def build(train: pd.DataFrame, score: pd.DataFrame, basis, model, version: str) -> dict[str, pd.DataFrame]:
+    """train: the training rows with add_flags (named judges); score: data.SCORING_QUERY's."""
+    rounds = rounds_table(score, basis, model, version)
+    tables = {"ROUNDS": rounds, **fight_tables(score, basis, model, version)}
+    tables["JUDGES"] = judges_table(train, basis, model, rounds, version)
+    tables["FIGHTERS"] = fighters_table(tables["FIGHTS"], score, version)
+    for t in tables.values():
+        t["publish_format"] = PUBLISH_FORMAT
     return tables
 
 
