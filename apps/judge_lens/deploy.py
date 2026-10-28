@@ -8,13 +8,17 @@ only the PUBLISHED Judge Lens views.
 """
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent / "streamlit_app.py"
+HERE = Path(__file__).resolve().parent
+APP = HERE / "streamlit_app.py"
+# the container runtime installs the app's dependencies from this, beside the app
+FILES = [APP, HERE / "pyproject.toml"]
 
 
 def deploy(cur, env: str) -> str:
     cur.execute(f"use database FIGHTGRADE_{env.upper()}")
     cur.execute("create stage if not exists ML.APPS comment = 'Streamlit app sources (apps/)'")
-    cur.execute(f"put 'file://{APP}' @ML.APPS/judge_lens auto_compress = false overwrite = true")
+    for f in FILES:
+        cur.execute(f"put 'file://{f}' @ML.APPS/judge_lens auto_compress = false overwrite = true")
     cur.execute("""
         create or replace streamlit PUBLISHED.JUDGE_LENS
         from '@ML.APPS/judge_lens'
