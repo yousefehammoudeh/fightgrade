@@ -210,3 +210,50 @@ resource "snowflake_grant_privileges_to_account_role" "transformer_ml" {
     schema_name = snowflake_schema.ml[each.key].fully_qualified_name
   }
 }
+
+# DEV can see into PROD.ML too, read only, as it can PROD's dbt layers: the
+# prediction log the training job appends to, for checking PROD's runs. No
+# privilege on the models or procedures themselves.
+resource "snowflake_grant_privileges_to_account_role" "dev_reads_prod_ml" {
+  account_role_name = snowflake_account_role.transformer["DEV"].name
+  privileges        = ["USAGE"]
+  on_schema {
+    schema_name = snowflake_schema.ml["PROD"].fully_qualified_name
+  }
+}
+
+resource "snowflake_grant_privileges_to_account_role" "dev_reads_prod_ml_future" {
+  account_role_name = snowflake_account_role.transformer["DEV"].name
+  privileges        = ["SELECT"]
+  on_schema_object {
+    future {
+      object_type_plural = "TABLES"
+      in_schema          = snowflake_schema.ml["PROD"].fully_qualified_name
+    }
+  }
+}
+
+# ─── Streamlit ───────────────────────────────────────────────────────
+# The Judge Lens page is a Streamlit in Snowflake app in PUBLISHED, beside the
+# views it reads, created by the judge model's training job (apps/judge_lens).
+# It runs with its owner's (the transformer's) rights; READER, what viewers use,
+# gets USAGE on every app created in PROD.PUBLISHED.
+resource "snowflake_grant_privileges_to_account_role" "transformer_streamlit" {
+  for_each          = toset(local.envs)
+  account_role_name = snowflake_account_role.transformer[each.key].name
+  privileges        = ["CREATE STREAMLIT"]
+  on_schema {
+    schema_name = snowflake_schema.layer["${each.key}.PUBLISHED"].fully_qualified_name
+  }
+}
+
+resource "snowflake_grant_privileges_to_account_role" "reader_streamlit_future" {
+  account_role_name = snowflake_account_role.reader.name
+  privileges        = ["USAGE"]
+  on_schema_object {
+    future {
+      object_type_plural = "STREAMLITS"
+      in_schema          = snowflake_schema.layer["PROD.PUBLISHED"].fully_qualified_name
+    }
+  }
+}
