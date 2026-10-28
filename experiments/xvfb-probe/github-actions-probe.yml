@@ -1,0 +1,48 @@
+# Datacenter-IP test for the Tapology crawler (DESIGN.md §4.4).
+# Runs experiments/xvfb-probe/ unchanged on a GitHub-hosted runner (Azure IPs), so the only
+# variable vs. the 2026-10-24 residential run is the egress IP (and amd64 vs arm64).
+#
+# Deliberately tiny: probe.py = 2 channels x (1 nav + 1 fetch); probe2.py = 1 nav + 3 fetches,
+# 1.0 s pacing. probe2 only runs if probe.py cleared, and nothing retries: a block kept warm
+# never clears.
+name: xvfb-probe
+
+on:
+  workflow_dispatch:
+  # GitHub only dispatches workflows that exist on the default branch; this branch-scoped push
+  # trigger lets it run without merging to main. It never fires anywhere else.
+  push:
+    branches: [probe/datacenter-ip]
+
+concurrency:
+  group: tapology-crawler   # never two crawlers at once
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Egress IP and ASN
+        run: curl -s --max-time 10 https://ipinfo.io/json | grep -E '"(ip|city|region|country|org)"' || true
+
+      - name: Build probe image
+        run: docker build -t xvfb-probe experiments/xvfb-probe
+
+      - name: Playwright / browser versions
+        run: docker run --rm xvfb-probe bash -lc "pip show playwright | head -2; uname -m"
+
+      - name: probe.py (both channels, nav + one fetch)
+        run: docker run --rm xvfb-probe | tee probe1.log
+
+      - name: probe2.py (seed nav + 3 same-origin fetches) — only if probe.py cleared
+        run: |
+          if grep -q "nav=CLEARED" probe1.log; then
+            sleep 15
+            docker run --rm -v "$PWD/experiments/xvfb-probe/probe2.py:/probe2.py:ro" xvfb-probe \
+              bash -lc "Xvfb :99 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & sleep 3; python /probe2.py"
+          else
+            echo ">>> probe.py did not clear; skipping probe2 so the block is not kept warm"
+          fi
