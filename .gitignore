@@ -19,6 +19,33 @@ analysis/out/
 # research notes, becoming a table
 combat_sports_title_lineages.txt
 
+# ─── Legacy: kept on disk, out of git ───────────────────────────────
+# Pre-pipeline tools whose work is done or superseded by pipeline/,
+# orchestration/ and dbt/. Nothing tracked imports them.
+# fighter-style vectors: a non-goal (DESIGN.md §10)
+analysis/
+# the local title-fight browser, and what feeds it
+viewer/
+scripts/build_title_fight_viewer.py
+# stage-2 promotion ingest and in-page JS crawlers
+scrapers/ingest/
+scrapers/reference/
+# crawl-era helpers
+scrapers/driver/crawl_stage2.py
+scrapers/driver/coverage_audit.py
+scrapers/driver/fetch_samples.py
+# one-off data fixes, already applied, and graph exports for analysis/
+scripts/assign_missing_regions.py
+scripts/backfill_sitemap_events.py
+scripts/remove_cancelled_events.py
+scripts/weight_audit.py
+scripts/verify_lineage_textfile.py
+scripts/build_ufc_graph.py
+scripts/style_gexf.py
+scripts/promotion_leaderboard.py
+# local Claude Code settings
+.claude/
+
 # ─── Terraform ──────────────────────────────────────────────────────
 **/.terraform/
 *.tfstate
