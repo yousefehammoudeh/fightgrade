@@ -803,10 +803,28 @@ The round effect is the stats' blind spot, measured: what every judge sees that 
 | views | `PUBLISHED.pub_judge_lens`, `_rounds`, `_cards`, `_swaps`, `pub_judge_profile`, `pub_fighter_decision_luck` (dbt, tag `judge_lens`; `dbt_prod_build` leaves them out, since it runs before the tables exist) |
 | app | `PUBLISHED.JUDGE_LENS`, the Streamlit in Snowflake page (`apps/judge_lens`) |
 
-The page has four tabs: **Fight** (the verdicts, round by round, how the model scores each round, the
-likely cards, swap a judge), **Judges** (what each named judge rewards, 10-8s, lone dissents, the
-style map), **Decision luck** (fighters, and the decisions the stats disagree with most) and **About**.
-Everything published is in sample; `ML.JUDGE_LENS_PREDICTIONS` is the out-of-sample record.
+**What is published is every decision the model can score**, not only the ones it trained on: both
+fighters' round stats and control tracked, whatever the year (`data.SCORING_QUERY`). The model needs
+only the stats, and a judge whose round scores are unknown is still a card: their total. That is
+4,311 decisions, against 3,457 with every round scored. `trained_on` marks the 3,601 the model
+trained on any part of; the other 710, mostly before 2010, are an out-of-sample test:
+
+| | Decisions | Favourite won | Log loss | Calibration error |
+|---|---|---|---|---|
+| Trained on (in sample) | 3,581 | 86.0% | 0.324 | 0.023 |
+| **Never trained on** | **705** | **85.2%** | **0.289** | **0.028** |
+| of which before 2010 | 427 | 85.9% | 0.262 | 0.027 |
+
+On the never-trained fights the model calls each judge's card winner right 82.9% of the time (2,090
+cards). Bisping–Hamill (UFC 75, 2007) is one: Hamill 87.5% on the stats, against two 29-28 Bisping cards.
+
+The page has four tabs: **Fight** (the verdicts, round by round with "not recorded" where only a
+total is known, how the model scores each round, the likely cards, swap a judge), **Fighter** (a
+fighter's decisions against what an average panel would give, what wins them rounds, and the judges
+who scored them), **Decision luck** (fighters, and the decisions the stats disagree with most) and
+**About**. `ML.JUDGE_LENS_PREDICTIONS` is the prospective record. The publish step stamps
+`publish_format` on every row, so a change to what is published reaches PROD on the next run even
+when the model version has not changed.
 **Measured on every run, on held-out predictions only:**
 - **Overall:** log loss (selects), Brier, calibration error and a reliability curve for P(won
   round) and for P(10-8), accuracy.

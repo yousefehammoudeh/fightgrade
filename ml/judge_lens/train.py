@@ -212,26 +212,29 @@ def fit_and_register(session, df: pd.DataFrame, config: dict, exp) -> dict:
 
 
 def publish_tables(session, df: pd.DataFrame, basis, model, version: str) -> dict:
+    """df: the training rows (add_flags'd); the scored decisions come from data.SCORING_QUERY."""
     from . import publish
     started = time.time()
-    counts = publish.write(session, publish.build(df, basis, model, version))
-    return {"version": version, "rows": counts, "seconds": round(time.time() - started)}
+    score = data.from_snowpark(session, data.SCORING_QUERY)
+    counts = publish.write(session, publish.build(df, score, basis, model, version))
+    return {"version": version, "format": publish.PUBLISH_FORMAT, "rows": counts, "seconds": round(time.time() - started)}
 
 
-def publish_default(session, df: pd.DataFrame) -> dict:
+def publish_default(session, df: pd.DataFrame, config: dict) -> dict:
     """mode 'publish': the default version's tables, unless they already hold it."""
     from . import registry
 
     current = registry.default_version(session)
     if current is None:
         return {"mode": "publish", "published": None, "reason": "no version registered yet"}
+    from .publish import PUBLISH_FORMAT
     version = current[0]
     try:
-        held = session.sql("select max(model_version) from ML.JUDGE_LENS_FIGHTS").collect()[0][0]
-    except Exception:           # not there yet
+        held = tuple(session.sql("select max(model_version), max(publish_format) from ML.JUDGE_LENS_FIGHTS").collect()[0])
+    except Exception:           # not there yet, or from before publish_format
         held = None
-    if held == version:
-        return {"mode": "publish", "published": None, "reason": f"tables already hold {version}"}
+    if held == (version, PUBLISH_FORMAT) and not config.get("force"):
+        return {"mode": "publish", "published": None, "reason": f"tables already hold {version}, format {PUBLISH_FORMAT}"}
     basis, model = registry.load(session, version)
     return {"mode": "publish", "published": publish_tables(session, df, basis, model, version)}
 
@@ -297,7 +300,7 @@ def main(session, config: dict) -> dict:
     if mode == "log":
         return log_predictions(session, df)
     if mode == "publish":
-        return publish_default(session, df)
+        return publish_default(session, df, config)
     exp = ExperimentTracking(session=session, database_name=session.get_current_database().strip('"'),
                              schema_name="ML")
     if mode == "fit":

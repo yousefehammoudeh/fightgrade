@@ -1,5 +1,9 @@
 -- One row per decision: what the real panel, an average panel, the crowd and random
 -- panels make of the fight's round statistics, beside what happened (DESIGN.md §8).
+-- Every decision with both fighters' round stats and control tracked, whatever the
+-- year; judges_cards are the totals handed in, so a card whose rounds are unknown
+-- still counts. trained_on says whether the model trained on any of the fight; the
+-- rest (mostly before 2010, before_training_years) are an out-of-sample test.
 -- Fighter A and B are the fight's UFC Stats fighters ordered by id; the result says
 -- who won. p_actual_result is how likely the result was: low is what the stats call
 -- a robbery, which is not the same as one.
@@ -15,11 +19,16 @@ select
     f.ufcstats_fight_id,
     e.event_name,
     f.event_date,
+    f.fighter_a_id,
+    f.fighter_b_id,
     a.name                                          as fighter_a,
     b.name                                          as fighter_b,
     case f.result when 'A' then a.name when 'B' then b.name end as winner,
     f.result,
     f.rounds,
+    f.trained_on,
+    f.before_training_years,
+    f.judges_with_rounds,
     c.judges_cards,
     f.deducted_a,
     f.deducted_b,
