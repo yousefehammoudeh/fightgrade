@@ -1,0 +1,43 @@
+version: 2
+
+sources:
+  - name: judge_lens
+    description: >
+      What the judge model's training job (ML.TRAIN_JUDGE_LENS, mode 'publish') writes:
+      the default version's view of every decision, replaced whole each time a version
+      is promoted (ml/judge_lens/publish.py). Not dbt's: the job creates them.
+    schema: ML
+    tables:
+      - name: judge_lens_fights
+      - name: judge_lens_rounds
+      - name: judge_lens_cards
+      - name: judge_lens_swaps
+      - name: judge_lens_judges
+      - name: judge_lens_fighters
+
+models:
+  - name: pub_judge_lens
+    description: "{{ doc('pub_judge_lens') }}"
+    columns:
+      - name: decision_id
+        data_tests: [unique, not_null]
+      - name: result
+        data_tests:
+          - accepted_values: {arguments: {values: [A, B, draw]}}
+  - name: pub_judge_lens_rounds
+    data_tests:
+      - unique_columns: {arguments: {columns: [ufcstats_fight_id, round, rater_key]}}
+  - name: pub_judge_lens_swaps
+    data_tests:
+      - unique_columns: {arguments: {columns: [decision_id, seat_rater_key, replacement_rater_id]}}
+  - name: pub_judge_lens_cards
+    data_tests:
+      - unique_columns: {arguments: {columns: [decision_id, rater_key]}}
+  - name: pub_judge_profile
+    columns:
+      - name: rater_id
+        data_tests: [unique, not_null]
+  - name: pub_fighter_decision_luck
+    columns:
+      - name: fighter_id
+        data_tests: [unique, not_null]

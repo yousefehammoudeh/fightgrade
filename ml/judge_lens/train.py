@@ -10,6 +10,11 @@
                     through the registry by the newest version that passed its gate
                     and never trained on it, appended to ML.JUDGE_LENS_PREDICTIONS
 
+    mode 'publish'  the default version's view of every decision, into the
+                    ML.JUDGE_LENS_* tables the PUBLISHED models read (publish.py);
+                    nothing to do when they already hold that version. 'fit' runs
+                    it as soon as it promotes a version.
+
 The training job runs 'log' before 'fit', so a new card is scored by the version
 that existed before it. main() is the handler of the ML.TRAIN_JUDGE_LENS stored
 procedure: cv/forward/test run one or more hyperparameter settings and log each
@@ -201,8 +206,34 @@ def fit_and_register(session, df: pd.DataFrame, config: dict, exp) -> dict:
     exp.log_metrics({k: v for k, v in metrics.items() if v is not None and np.isfinite(v)})
     exp.end_run(run)
     clean = {k: (v if v is None or np.isfinite(v) else None) for k, v in metrics.items()}
-    return {"mode": "fit", "version": version, "registered": True, "promoted": promote,
+    published = publish_tables(session, df, basis, model, version) if promote else None
+    return {"mode": "fit", "version": version, "registered": True, "promoted": promote, "published": published,
             "gate_failures": failures, "train_through": through, "holdout": bt["holdout"], "metrics": clean}
+
+
+def publish_tables(session, df: pd.DataFrame, basis, model, version: str) -> dict:
+    from . import publish
+    started = time.time()
+    counts = publish.write(session, publish.build(df, basis, model, version))
+    return {"version": version, "rows": counts, "seconds": round(time.time() - started)}
+
+
+def publish_default(session, df: pd.DataFrame) -> dict:
+    """mode 'publish': the default version's tables, unless they already hold it."""
+    from . import registry
+
+    current = registry.default_version(session)
+    if current is None:
+        return {"mode": "publish", "published": None, "reason": "no version registered yet"}
+    version = current[0]
+    try:
+        held = session.sql("select max(model_version) from ML.JUDGE_LENS_FIGHTS").collect()[0][0]
+    except Exception:           # not there yet
+        held = None
+    if held == version:
+        return {"mode": "publish", "published": None, "reason": f"tables already hold {version}"}
+    basis, model = registry.load(session, version)
+    return {"mode": "publish", "published": publish_tables(session, df, basis, model, version)}
 
 
 def newest_unseen(event_dates: pd.Series, passed: list[tuple[str, str]]) -> pd.Series:
@@ -265,6 +296,8 @@ def main(session, config: dict) -> dict:
     df = add_flags(data.from_snowpark(session))
     if mode == "log":
         return log_predictions(session, df)
+    if mode == "publish":
+        return publish_default(session, df)
     exp = ExperimentTracking(session=session, database_name=session.get_current_database().strip('"'),
                              schema_name="ML")
     if mode == "fit":

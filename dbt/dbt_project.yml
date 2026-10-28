@@ -35,6 +35,16 @@ models:
     refined:
       +schema: REFINED
       +materialized: table
+    # PUBLISHED: what the front end reads (DESIGN.md §5).
+    published:
+      +schema: PUBLISHED
+      +materialized: table
+      # Judge Lens: views over the ML.JUDGE_LENS_* tables the training job writes,
+      # built by that job after it publishes (judge_lens_train), not by
+      # dbt_prod_build, which runs before it: the tables must exist first.
+      judge_lens:
+        +materialized: view
+        +tags: [judge_lens]
 
 seeds:
   fightgrade:
