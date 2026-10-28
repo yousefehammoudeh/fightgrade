@@ -38,6 +38,13 @@ models:
   - name: lnd_tapology_bout_details
     description: Title-bout pages, including the 8,101 cancelled title bouts that never reached bouts.
     columns: *landing_columns
+  - name: lnd_tapology_fighter_records
+    description: >
+      Fighter pages (pipeline/tapology_fighters.py), one row per bout on a fetched fighter's
+      record, every sport and status. Holds the bouts the event crawl cannot reach: those with
+      no event page, and some with no bout page. A bout appears once per fighter fetched;
+      join on payload:bout_id.
+    columns: *landing_columns
   - name: lnd_tapology_promotions
     description: Promotion index rows (id, slug, name).
     columns: *landing_columns

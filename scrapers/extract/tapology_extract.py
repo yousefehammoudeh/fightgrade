@@ -706,9 +706,114 @@ def parse_bout_page(html, url=None):
     b["parse_ok"] = bool(b["info"]) or bool(b["comparison"])
     return b
 
+MONTHS = {m: i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
+RECORD_ROW = re.compile(r"fighter-record-bout(\s|$)")
+
+def record_date(year, month_day):
+    """'2004', 'Sep 11' -> ('2004-09-11', 'full'); a row with only a year -> ('2004', 'year')."""
+    y = re.fullmatch(r"\d{4}", year or "")
+    if not y:
+        return None, None
+    m = re.fullmatch(r"([A-Z][a-z]{2})\s+(\d{1,2})", month_day or "")
+    if m and m.group(1) in MONTHS:
+        return f"{y.group(0)}-{MONTHS[m.group(1)]:02d}-{int(m.group(2)):02d}", "full"
+    return y.group(0), "year"
+
+def parse_fighter_page(html, url=None):
+    """A fighter page's record: every bout row, in every sport, including the ones that
+    have no event page -- or no bout page -- anywhere else on Tapology.
+
+    Not soup_of(): the record's detail rows (Event:, Weigh-In Result:) are only in the
+    md:hidden copy, so stripping mobile duplicates would drop them. Each row is read
+    from its own block, so no value is seen twice."""
+    s = BeautifulSoup(html, "lxml")
+    for t in s(["script", "style", "noscript"]):
+        t.decompose()
+    f = {"fighter_url": url, "fighter_slug": fighter_slug(url), "fighter_name": None, "page_title": None,
+         "bouts": []}
+    # the page has no h1: <title> is 'Anderson Silva ("The Spider") | MMA Fighter Page | Tapology'
+    title = s.find("title")
+    f["page_title"] = val(title.get_text()) if title else None
+    if f["page_title"]:
+        f["fighter_name"] = val(re.sub(r'\s*\(".*"\)\s*$', "", f["page_title"].split(" | ")[0]))
+    for row in s.find_all("div", class_=RECORD_ROW, attrs={"data-bout-id": True}):
+        bid = row["data-bout-id"]
+        b = {"bout_id": int(bid) if bid.isdigit() else None, "sport": row.get("data-sport"),
+             "division": row.get("data-division"), "status": row.get("data-status"),
+             "result": None, "method_kind": None, "opponent_slug": None, "opponent_name": None,
+             "record_before": None, "opponent_record_before": None, "bout_slug": None,
+             "method_line": None, "promotion_id": None, "promotion_slug": None, "promotion_name": None,
+             "year": None, "month_day": None, "date": None, "date_precision": None,
+             "event_id": None, "event_slug": None, "event_name": None,
+             "opponent_rank": None, "opponent_rank_url": None,
+             "details": {}, "details_raw": {}}
+        res = row.find("div", class_="result")
+        if res:
+            cells = [c for c in res.find_all("div", recursive=False)]
+            b["result"] = val(cells[0].get_text(strip=True)) if cells else None
+            b["method_kind"] = val(cells[1].get_text(strip=True)) if len(cells) > 1 else None
+        opp = row.find("a", title=re.compile(r" Fighter Page$"))
+        if opp:
+            b["opponent_slug"], b["opponent_name"] = fighter_slug(opp["href"]), val(opp.get_text(strip=True))
+        else:   # an opponent with no profile: the name is plain text in the same cell
+            cell = row.find("div", class_=re.compile(r"font-bold text-neutral-800"))
+            b["opponent_name"] = val(cell.get_text(" ", strip=True)) if cell else None
+        for sp in row.find_all("span", title=True):
+            if sp["title"] == "Fighter Record Before Fight":
+                b["record_before"] = val(sp.get_text(strip=True))
+            elif sp["title"] == "Opponent Record Before Fight":
+                b["opponent_record_before"] = val(sp.get_text(strip=True))
+        bout = row.find("a", title="Bout Page")
+        if bout:
+            b["bout_slug"] = id_slug(bout["href"], "bouts")[1]
+            b["method_line"] = val(bout.get_text(" ", strip=True))
+        else:   # no bout page: the desktop method cell is bare text ("Win")
+            cell = row.find("div", class_=re.compile(r"text-neutral-700 text-xs font-bold"))
+            b["method_line"] = val(cell.get_text(" ", strip=True)) if cell else None
+        promo = row.find("a", title="Promotion Page")
+        if promo:
+            b["promotion_id"], b["promotion_slug"] = id_slug(promo["href"], "promotions")
+            b["promotion_name"] = val(promo.get_text(strip=True))
+        when = row.find("span", class_=re.compile(r"text-tap_3 font-bold"))
+        if when:
+            b["year"] = val(when.get_text(strip=True))
+            nxt = when.find_next_sibling("span")
+            b["month_day"] = val(nxt.get_text(strip=True)) if nxt else None
+        b["date"], b["date_precision"] = record_date(b["year"], b["month_day"])
+        # the opponent's ranking at the time, a badge linking to that date's historical table
+        rank = row.find("a", href=re.compile(r"^/rankings/"))
+        if rank:
+            b["opponent_rank_url"] = rank["href"]
+            n = re.search(r"#\s*(\d+)", rank.get_text("", strip=True))
+            b["opponent_rank"] = int(n.group(1)) if n else None
+        details = s.find(id=f"detail-rows-{bid}")
+        for line in details.find_all("div", recursive=False) if details else []:
+            lab = line.find("span", class_="font-bold")
+            if not lab:
+                continue
+            raw = sq(lab.get_text())
+            if not raw.endswith(":") or raw in b["details_raw"]:
+                continue
+            rest = line.__copy__()
+            rest.find("span", class_="font-bold").decompose()
+            v = val(rest.get_text(" ", strip=True))
+            b["details_raw"][raw], b["details"][canon(raw)] = v, v
+            if raw == "Event:":
+                a = line.find("a", href=re.compile(r"/fightcenter/events/"))
+                if a:
+                    b["event_id"], b["event_slug"] = id_slug(a["href"], "events")
+                    b["event_name"] = val(a.get_text(strip=True))
+        f["bouts"].append(b)
+    f["parse_ok"] = bool(f["bouts"])
+    return f
+
 if __name__ == "__main__":
     path = Path(sys.argv[1])
     url = sys.argv[2] if len(sys.argv) > 2 else None
     html = path.read_text(encoding="utf-8", errors="replace")
+    if "/fighters/" in (url or ""):
+        print(json.dumps(parse_fighter_page(html, url), ensure_ascii=False, indent=2))
+        sys.exit()
     fn = parse_bout_page if "/bouts/" in (url or "") or "bout-" in path.name else parse_event
     print(json.dumps(fn(html, url), ensure_ascii=False, indent=2))

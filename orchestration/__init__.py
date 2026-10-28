@@ -37,6 +37,11 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    the same reasons; its own six lnd_mmadecisions_* tables.
                    It re-reads events up to 14 days old, so each card is read
                    the morning after and again a week later.
+  tapology_fighter_crawl  fighter pages -> every bout on their records -> lake
+                   (orchestration/tapology_fighters.py). Launched by hand, one
+                   run per shard of the plan; no schedule. It reaches the bouts
+                   the event crawl cannot: those with no event page. Its LANDING
+                   table is loaded by the PROD build after it.
 
 A crawl that stops before archiving anything fails, and the crawl_retry sensor
 launches it again with the same config: Serverless gives each run one of 3
@@ -73,6 +78,7 @@ from dagster import (
 from .dbt_cli import run_dbt
 from .main_checkout import IN_DAGSTER_PLUS, IS_BRANCH_DEPLOYMENT, main_dbt_project
 from .tapology import RETRY_ON_ANOTHER_IP, tapology_crawl
+from .tapology_fighters import tapology_fighter_crawl
 from .judge_lens import judge_lens_train
 from .mmadecisions import mmadecisions_crawl
 from .ufcstats import ufcstats_crawl
@@ -152,7 +158,7 @@ def judge_lens_after_build(context: RunStatusSensorContext) -> RunRequest:
     return RunRequest(run_key=context.dagster_run.run_id)
 
 
-CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl]
+CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl]
 IP_RETRY_TAG = "fightgrade/ip_retry"
 # With one refused IP in three, four misses in a row is about one night in 80.
 MAX_IP_RETRIES = 3
