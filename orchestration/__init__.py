@@ -17,7 +17,8 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
   judge_lens_train the judge model, after every successful PROD build, by the
                    judge_lens_after_build sensor (orchestration/judge_lens.py):
                    log the default version's predictions for new rounds, then
-                   retrain and register a version when there are new rounds.
+                   retrain and register a version when there are new rounds, then
+                   publish its tables and build the Judge Lens views on them.
   tapology_crawl   newly completed Tapology events -> lake -> LANDING
                    (orchestration/tapology.py). Daily at 02:00, Tapology's
                    quiet hour: its audience is ~41% US, then the UK and central
@@ -111,7 +112,9 @@ def dbt_build_prod(context: OpExecutionContext, config: ProdBuildConfig, project
     target = "dev" if IS_BRANCH_DEPLOYMENT else "prod"
     if target == "dev":
         context.log.warning("branch deployment: building DEV, not PROD")
-    args = ["build", "--target", target]
+    # The Judge Lens views read tables the judge model's job writes after this build,
+    # so that job builds them (orchestration/judge_lens.py).
+    args = ["build", "--target", target, "--exclude", "tag:judge_lens"]
     if config.select:
         args += ["--select", config.select]
     if config.full_refresh:
