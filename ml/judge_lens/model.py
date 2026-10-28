@@ -195,6 +195,15 @@ class JudgeLens:
         P = np.maximum(self._probs(eta, t1, t2, t3)[0], FLOOR)
         return P / P.sum(axis=1, keepdims=True)
 
+    def score(self, X: np.ndarray, raters: np.ndarray, years: np.ndarray) -> tuple[np.ndarray, ...]:
+        """eta and the three cut-points per row, before they become probabilities:
+        what panel.py adds the shared round and fight effects to."""
+        raters = np.asarray(raters, dtype=object)
+        eta, t1, t2, t3, _ = self._forward(self.p, np.asarray(X, float), self.rater_index(raters),
+                                           era_index(years, self.era), (raters == CROWD).astype(float))
+        n = len(eta)
+        return eta, *(np.broadcast_to(t, n).astype(float) for t in (t1, t2, t3))
+
     def state(self) -> dict:
         """Everything predict() needs, as plain lists: the registry's model and the
         fallback coefficients table are both built from this."""

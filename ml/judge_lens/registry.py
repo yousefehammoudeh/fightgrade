@@ -106,6 +106,13 @@ def version(session, name: str):
     return _model(session).version(name)
 
 
+def load(session, name: str):
+    """(basis, model) of a registered version: its fitted numbers, in this code's
+    classes, so a version registered before a change (panel.py's score()) still loads."""
+    m = version(session, name).load(force=True)
+    return Basis.from_state(m.basis.state()), JudgeLens.from_state(m.model.state())
+
+
 def passed_versions(session) -> list[tuple[str, str]]:
     """(version, train_through) for every version that passed its gate, oldest first."""
     m = _model(session)

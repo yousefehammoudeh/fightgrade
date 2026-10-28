@@ -14,7 +14,8 @@ QUERY = f"""
 select
     j.ufcstats_fight_id, j.round, j.rater_key, j.rater_kind, j.rater_id, j.rater_name,
     j.decision_id, j.ufcstats_event_id, j.event_date, j.period, j.cv_fold, j.margin, j.label_weight,
-    j.fighter_a_id, fa.name as fighter_a_name,
+    j.fighter_a_id, fa.name as fighter_a_name, j.fighter_b_id, fb.name as fighter_b_name,
+    j.score_a, j.score_b, j.deducted_a, j.deducted_b,
     {", ".join(f"j.{c}" for c in LABELS)},
     {", ".join(f"a.{c} as a_{c}" for c in STATS)},
     {", ".join(f"b.{c} as b_{c}" for c in STATS)}
@@ -24,6 +25,7 @@ join refined.fct_ufc_round_stats a
 join refined.fct_ufc_round_stats b
   on b.ufcstats_fight_id = j.ufcstats_fight_id and b.round = j.round and b.ufcstats_fighter_id = j.fighter_b_id
 left join cleansing.cln_ufcstats_fighters fa on fa.ufcstats_fighter_id = j.fighter_a_id
+left join cleansing.cln_ufcstats_fighters fb on fb.ufcstats_fighter_id = j.fighter_b_id
 where j.exclusion_reason is null
   and j.event_date >= '2010-01-01'
 """

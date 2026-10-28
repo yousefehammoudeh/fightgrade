@@ -783,6 +783,30 @@ From SQL, any version or the default:
 select MODEL(ML.JUDGE_LENS)!predict(rater_id, year, a_knockdowns, ..., b_ctrl_seconds):p_a_wins
 ```
 
+### Judge Lens, as built
+
+**Whole fights need judges who watch the same fight** (`ml/judge_lens/panel.py`). Scored
+independently, three judges agree less than real panels do, and fight-level probabilities came out
+too sure: a 94% favourite won 88%. So each round gets a shared effect (all three judges) and each
+fight one (every round), and a judge's score becomes scale × eta + u + v. Fitted by maximum likelihood
+on the out-of-fold judge scores (3,601 fights): **round sd 1.82, fight sd 1.26, scale 1.55**, +1,652
+log-likelihood over independent judges. The scale keeps each judge's round predictions as calibrated
+as before (log loss 0.4693 → 0.4702). Fight-level calibration error fell from 0.033 to 0.014, ahead of
+a logistic recalibration (0.018), and unlike one, it lets swaps and random panels share the fight.
+The round effect is the stats' blind spot, measured: what every judge sees that the numbers miss.
+
+**The pipeline**, all in `judge_lens_train` after each PROD build:
+
+| Step | Writes |
+|---|---|
+| fit, when it promotes, or `publish` | `ML.JUDGE_LENS_ROUNDS`, `_FIGHTS`, `_CARDS`, `_SWAPS`, `_JUDGES`, `_FIGHTERS` (`publish.py`, ~2.5 min) |
+| views | `PUBLISHED.pub_judge_lens`, `_rounds`, `_cards`, `_swaps`, `pub_judge_profile`, `pub_fighter_decision_luck` (dbt, tag `judge_lens`; `dbt_prod_build` leaves them out, since it runs before the tables exist) |
+| app | `PUBLISHED.JUDGE_LENS`, the Streamlit in Snowflake page (`apps/judge_lens`) |
+
+The page has four tabs: **Fight** (the verdicts, round by round, how the model scores each round, the
+likely cards, swap a judge), **Judges** (what each named judge rewards, 10-8s, lone dissents, the
+style map), **Decision luck** (fighters, and the decisions the stats disagree with most) and **About**.
+Everything published is in sample; `ML.JUDGE_LENS_PREDICTIONS` is the out-of-sample record.
 **Measured on every run, on held-out predictions only:**
 - **Overall:** log loss (selects), Brier, calibration error and a reliability curve for P(won
   round) and for P(10-8), accuracy.
