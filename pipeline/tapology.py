@@ -120,14 +120,14 @@ class Budget:
     limit, for the Stop: the run's own cap, a backfill's daily ledger, another run."""
 
     def __init__(self, limit: int, minutes: float = MAX_FETCH_MINUTES, why: str = "request budget spent"):
-        self.limit, self.spent, self.why = limit, 0, why
+        self.limit, self.spent, self.why, self.minutes = limit, 0, why, minutes
         self.deadline = time.time() + minutes * 60
 
     def take(self) -> None:
         if self.spent >= self.limit:
             raise Stop(f"{self.why} ({self.limit} requests)")
         if time.time() > self.deadline:
-            raise Stop(f"fetch deadline reached ({MAX_FETCH_MINUTES} min)")
+            raise Stop(f"fetch deadline reached ({self.minutes:g} min)")
         self.spent += 1
 
 
