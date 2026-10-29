@@ -123,7 +123,9 @@ def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: s
                 html, status = tap.polite_fetch(br, url, tap.c3.JS, sleep)
                 if html is None:
                     report[f"fighter_miss_{status}"] += 1
-                    streak = streak + 1 if status.startswith("gave_up_") else 0
+                    # only a fetched page resets the streak: a 404 between give-ups is not a sign
+                    # the block has lifted (2026-10-28: shards looped for hours on interleaved 404s)
+                    streak = streak + 1 if status.startswith("gave_up_") else streak
                     if streak >= MAX_MISS_STREAK:
                         raise tap.Stop(f"{streak} fighters in a row gave up (last {status} on {slug})")
                     continue
