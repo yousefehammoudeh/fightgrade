@@ -38,6 +38,11 @@ MIN_RECORD = 5              # pro MMA fights on the Tapology record; the Elo ran
 DAILY_BUDGET = 1500         # per IP per day; the 2026-10-26 event backfill ran clean at this
 FIGHTER_MARK = "fighter-record-bout"
 DBT_SELECT = "lnd_tapology_fighter_records"
+# Fighters in a row that gave up after polite_fetch's retries. Tapology's "Temporarily
+# Unavailable" page arrives as a normal response, not a 503, so it never trips the rate
+# limit stop: on 2026-10-28 all three prod shards spent hours on it, three requests and
+# ~70 s per fighter, while what they had fetched sat unloaded. Ten is ~12 minutes of it.
+MAX_MISS_STREAK = 10
 
 
 def plan_key(env: str) -> str:
@@ -104,6 +109,7 @@ def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: s
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "meta.json").write_text(json.dumps({"fetch_date": fetch_date, "env": env, "entity": ENTITY}))
     rows, pages, anomalies, report, stopped = {TABLE: []}, [], [], Counter(), None
+    streak = 0
     with sync_playwright() as pw:
         br = tap.Browser(pw, budget)
         try:
@@ -117,7 +123,13 @@ def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: s
                 html, status = tap.polite_fetch(br, url, tap.c3.JS, sleep)
                 if html is None:
                     report[f"fighter_miss_{status}"] += 1
+                    # only a fetched page resets the streak: a 404 between give-ups is not a sign
+                    # the block has lifted (2026-10-28: shards looped for hours on interleaved 404s)
+                    streak = streak + 1 if status.startswith("gave_up_") else streak
+                    if streak >= MAX_MISS_STREAK:
+                        raise tap.Stop(f"{streak} fighters in a row gave up (last {status} on {slug})")
                     continue
+                streak = 0
                 if FIGHTER_MARK not in html:
                     report["fighter_bad_page"] += 1
                     continue
