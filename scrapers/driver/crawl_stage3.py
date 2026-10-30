@@ -85,7 +85,9 @@ def save_vpn_pool(st):
 JS = r"""
 async (u) => {
   try {
-    const r = await fetch(u, {credentials:"include"});
+    // A request that never settles (a VPN exit swap mid-fetch, 2026-10-29) hung the run for
+    // hours: page.evaluate has no timeout of its own. The abort covers the body read too.
+    const r = await fetch(u, {credentials:"include", signal: AbortSignal.timeout(60000)});
     const b = await r.text();
     if (/Just a moment/i.test(b)) return {status:"CHALLENGE", html:null};
     // Tapology serves a tiny "Temporarily Unavailable" page under load. It arrives as a
