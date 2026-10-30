@@ -56,6 +56,10 @@ c3b = _load("crawl_stage3b", ROOT / "scrapers" / "driver" / "crawl_stage3b.py")
 
 TABLES = ("event_details", "bouts", "event_fighters", "bout_details")
 EVENT_LINK = re.compile(r"/fightcenter/events/(\d+-[A-Za-z0-9-]+)")
+# Each event on the results listing sits in a block with id "preview<event id>". The
+# sidebar (featured events, the pick'em deadline) links upcoming events too, which
+# would queue them from a page that lists only finished ones.
+LISTED_EVENT = re.compile(r"""id=['"]preview(\d+)['"]""")
 # qa() codes that mean a page did not parse into a usable record. Everything else
 # it reports (counts_disagree, no_promotion, ...) is a known property of real
 # Tapology data and is surfaced as a warning. That includes fighter_without_slug:
@@ -260,6 +264,16 @@ def polite_fetch(br: Browser, url: str, js: str, sleep: float) -> tuple[str | No
     return None, f"gave_up_{status}"
 
 
+def listed_events(html: str) -> list[str]:
+    """Event slugs in the listing's own results, in page order, without the sidebar's."""
+    links = list(dict.fromkeys(EVENT_LINK.findall(html)))
+    ids = set(LISTED_EVENT.findall(html))
+    if not ids:                     # the markup changed: take every link rather than find nothing
+        log("  results page has no preview blocks; taking every event link on it")
+        return links
+    return [s for s in links if s.split("-", 1)[0] in ids]
+
+
 def discover(br: Browser, accounted: set[str], sleep: float, cap: int, resume_page: int | None
              ) -> tuple[list[str], int | None, Stop | None]:
     """Event slugs on the results listing (newest first) that are neither archived
@@ -291,7 +305,7 @@ def discover(br: Browser, accounted: set[str], sleep: float, cap: int, resume_pa
             if html is None:
                 log(f"  results page {n}: {status}")
                 return None if status in ("404", "410") else n      # past the end, or retry tomorrow
-            on_page = list(dict.fromkeys(EVENT_LINK.findall(html)))
+            on_page = listed_events(html)
             if not on_page:
                 return None                                         # past the end of the listing
             new = [s for s in on_page if s not in accounted and s not in found]
@@ -468,6 +482,10 @@ def crawl(limit: int, sleep: float, budget: Budget, env: str, run_dir: Path, kno
                     report["event_parse_error"] += 1
                     anomalies.append({"slug": slug, "code": "parse_failed", "detail": f"{type(ex).__name__}: {ex}"})
                     defer(item, "parse_failed")
+                    continue
+                if ev.get("status") == "Cancelled":       # never gets results: no retries
+                    report["event_skipped_Cancelled"] += 1
+                    abandoned.add(slug)
                     continue
                 if ev.get("status") != "Completed":       # completed events only; try again later
                     report[f"event_skipped_{ev.get('status')}"] += 1
