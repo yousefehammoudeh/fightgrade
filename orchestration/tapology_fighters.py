@@ -53,10 +53,10 @@ def fighter_fetch(context: OpExecutionContext, config: FighterCrawlConfig) -> di
             todo = [s.strip() for s in config.slugs.split(",") if s.strip()]
         else:
             mine = tf.shard_slugs(lake, env, config.shard, config.shards)
-            done = tf.archived(lake, env)
+            done = tf.finished(lake, env)
             todo = [s for s in mine if s not in done]
             context.log.info(f"shard {config.shard}/{config.shards}: {len(mine):,} fighters, "
-                             f"{len(todo):,} not archived yet")
+                             f"{len(todo):,} left to fetch")
         if not todo:
             context.log.info("nothing left to fetch in this shard")
             return {"env": env, "run_id": run_id, "run_dir": str(run_dir), "result": None}
@@ -91,6 +91,8 @@ def fighter_upload(context: OpExecutionContext, bundle: dict) -> dict:
     pages, files = tap.upload(Lake(bundle["env"]), bundle["result"], bundle["staged"], Path(bundle["run_dir"]),
                               bundle["env"])
     context.log.info(f"uploaded {pages} raw pages and {files} Parquet files to zone '{zone(bundle['env'])}'")
+    tf.remember_no_record(Lake(bundle["env"]), bundle["env"], bundle["result"]["no_record"],
+                          bundle["result"]["fetch_date"])
     context.add_output_metadata({"raw_pages": pages, "parquet_files": files})
     return bundle
 

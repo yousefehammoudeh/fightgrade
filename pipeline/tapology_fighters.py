@@ -13,8 +13,9 @@ with the bout id, both records before the fight, the method, date and promotion.
 The plan is the fighters whose Tapology record is longer than what we hold, from the
 census in data/elo/record_gap.parquet (each fighter's last `record_after` against the
 bouts held), most-incomplete first. It is fixed once written, so shards split it the
-way the event backfill's do: every shards-th fighter, minus what is archived by now,
-so a shard cut short is simply run again.
+way the event backfill's do: every shards-th fighter, minus what is archived by now
+and the pages with no record on them (no_record.json), so a shard cut short is simply
+run again.
 
 The method is the event crawl's (pipeline.tapology): its Browser, polite_fetch, per-IP
 lock and daily ledger, 4 s spacing. Rows land in one table, fighter_records: one row
@@ -47,6 +48,10 @@ MAX_MISS_STREAK = 10
 
 def plan_key(env: str) -> str:
     return f"{zone(env)}state/tapology/fighter_records/plan.json"
+
+
+def no_record_key(env: str) -> str:
+    return f"{zone(env)}state/tapology/fighter_records/no_record.json"
 
 
 def record_rows(f: dict, key: str, fetch_date: str) -> list[dict]:
@@ -101,6 +106,20 @@ def archived(lake: Lake, env: str) -> set[str]:
     return lake.archived_slugs("tapology", ENTITY, zones)
 
 
+def finished(lake: Lake, env: str) -> set[str]:
+    """Fighters no shard needs to fetch again: archived, or a page with no record on it.
+    A removed fighter's URL now serves the generic FightCenter page, which is never
+    archived, so without the second set every run refetched it (2026-10-29: two of them
+    spent a driver's ten runs)."""
+    return archived(lake, env) | set(lake.read_json(no_record_key(env), {}))
+
+
+def remember_no_record(lake: Lake, env: str, slugs: list[str], fetch_date: str) -> None:
+    if slugs:
+        seen = lake.read_json(no_record_key(env), {})
+        lake.write_json(no_record_key(env), {**seen, **{s: fetch_date for s in slugs}})
+
+
 def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: str, run_dir: Path) -> dict:
     """Fetch, archive locally and parse each fighter page, until the list or the budget runs out."""
     from playwright.sync_api import sync_playwright
@@ -109,7 +128,7 @@ def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: s
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "meta.json").write_text(json.dumps({"fetch_date": fetch_date, "env": env, "entity": ENTITY}))
     rows, pages, anomalies, report, stopped = {TABLE: []}, [], [], Counter(), None
-    streak = 0
+    no_record, streak = [], 0
     with sync_playwright() as pw:
         br = tap.Browser(pw, budget)
         try:
@@ -132,6 +151,7 @@ def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: s
                 streak = 0
                 if FIGHTER_MARK not in html:
                     report["fighter_bad_page"] += 1
+                    no_record.append(slug)
                     continue
                 key = raw_html_key("tapology", ENTITY, fetch_date, slug, env)
                 local = run_dir / "raw" / ENTITY / f"{slug}.html.gz"
@@ -157,7 +177,7 @@ def crawl(slugs: list[str], limit: int, sleep: float, budget: tap.Budget, env: s
             br.close()
     report.update(requests=budget.spent, record_rows=len(rows[TABLE]))
     return {"fetch_date": fetch_date, "rows": rows, "pages": pages, "report": dict(report),
-            "anomalies": anomalies, "stopped": stopped}
+            "anomalies": anomalies, "stopped": stopped, "no_record": no_record}
 
 
 def rebuild(run_dir: Path, env: str) -> dict:
@@ -174,7 +194,7 @@ def rebuild(run_dir: Path, env: str) -> dict:
         rows[TABLE] += record_rows(f, key, fetch_date)
         report["fighters_kept"] += 1
     return {"fetch_date": fetch_date, "rows": rows, "pages": pages, "report": dict(report),
-            "anomalies": anomalies, "stopped": None}
+            "anomalies": anomalies, "stopped": None, "no_record": []}
 
 
 def verify(result: dict, staged: dict, run_dir: Path, env: str, lake: Lake | None) -> dict:
@@ -256,9 +276,9 @@ def main() -> int:
             todo = [s.strip() for s in args.slugs.split(",") if s.strip()]
         elif args.shards:
             mine = shard_slugs(lake, env, args.shard, args.shards)
-            done = archived(lake, env)
+            done = finished(lake, env)
             todo = [s for s in mine if s not in done]
-            tap.log(f"shard {args.shard}/{args.shards}: {len(mine):,} fighters, {len(todo):,} not archived yet")
+            tap.log(f"shard {args.shard}/{args.shards}: {len(mine):,} fighters, {len(todo):,} left to fetch")
         else:
             ap.error("give --plan, --slugs, --shard/--shards or --from-run")
         with tap.ip_budget(lake, args.max_requests, args.max_minutes, DAILY_BUDGET) as budget:
@@ -269,6 +289,7 @@ def main() -> int:
     if not args.dry_run:
         n_pages, n_files = tap.upload(lake, result, staged, run_dir, env)
         tap.log(f"uploaded {n_pages} pages and {n_files} Parquet files")
+        remember_no_record(lake, env, result["no_record"], result["fetch_date"])
     checks = verify(result, staged, run_dir, env, None if args.dry_run else lake)
     report = {"run_id": run_id, "env": env, "fetch_date": result["fetch_date"], "crawl": result["report"],
               "rows": {t: len(r) for t, r in result["rows"].items()}, **checks}
