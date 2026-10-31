@@ -19,7 +19,7 @@ the gold set must not either.
 | `opponent` | the opponent in the bout concerned, if named |
 | `event` | the card, if named (`ufc 254`, `ufc vegas 12`) |
 | `reason` | for a withdrawal, cancellation or suspension: `injury`, `illness`, `weight_cut`, `visa`, `doping`, `medical`, `legal`, `other`, if named |
-| `reviewed` | `y` once the user has checked the row |
+| `reviewed` | who checked the row after drafting: `claude` (a second pass the user delegated, 2026-10-31), `y` once the user has |
 
 ## Event types
 
@@ -49,13 +49,18 @@ Rulings made while drafting (2026-10-31), so the same case always gets the same 
 - **A replacement need not name the new fighter**: "X gets new opponent", "newcomer swoops in on
   four days notice" are `replacement`. "X pulled, replacement being looked for" is `withdrawal`.
 - **Injury news with no bout named as lost** ("breaks hand in training", "injury update ... UFC
-  189") is a `speculative` withdrawal.
+  189", "knee surgery to result in lengthy recovery") is a `speculative` withdrawal. An injury
+  revealed after a fight the fighter went through with is `fought_injured`.
 - **A fight billed as someone's last** ("final fight", "last faceoff ever") is a `confirmed`
   retirement.
 - **"Returns"** after an ordinary layoff, or to a promotion after fighting elsewhere, is
   `booking`. `return` is only after a retirement or a long absence from fighting.
-- **Not MMA** is `none`, even with MMA fighters: boxing (including exhibitions), RAF wrestling,
-  grappling, kickboxing, pro wrestling.
+- **Not MMA** is `none`, even with MMA fighters: boxing (including exhibitions), BKFC (bare-knuckle
+  boxing), RAF wrestling, grappling, kickboxing, pro wrestling, Karate Combat.
+- **A truncated slug** is read as its full title most likely ran: "dana white jon jones had right
+  to fight so canceling daniel cormier" ends "...wasn't an option", so it is `none`.
+- **"Draws" an opponent** means is matched with them: `booking`.
+- **A fighter's death** is `none`: there is no type for it yet, though rankings need it.
 - **Removed from the UFC roster** is `release`.
 - A whole card or event cancelled is `withdrawal` with no fighter.
 
