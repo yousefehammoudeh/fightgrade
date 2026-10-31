@@ -11,6 +11,13 @@ The daily run (05:00, after the 02:00 Tapology run and its build) reads each
 site's current and previous month: 4 requests. backfill=true reads every month
 not archived yet, ~515 requests, under an hour; one cut short is run again.
 
+replay=true re-parses the latest archived copy of every month from the bucket,
+with no requests to the sites: a parser change is replayed, never re-crawled.
+PROD's history is filled that way from a copy of DEV's archive:
+
+    gcloud storage cp -r gs://fightgrade-lake/dev/raw-xml/news gs://fightgrade-lake/raw-xml/
+    news_crawl with replay=true, on the production deployment
+
 A run whose every site stops before archiving anything (a refusal, a limit,
 another run holding the lock) fails, and the crawl_retry sensor launches it
 again, usually from another egress IP.
@@ -33,6 +40,7 @@ class NewsCrawlConfig(Config):
     interval: float = news.MIN_INTERVAL     # seconds between request starts on a site; 6 is the floor
     max_requests: int = 0                   # 0: news.DAILY_BUDGET, or news.BACKFILL_BUDGET for a backfill
     max_minutes: float = news.MAX_FETCH_MINUTES
+    replay: bool = False                    # re-parse the archive and load LANDING; no requests
 
 
 @op
@@ -46,8 +54,11 @@ def news_fetch(context: OpExecutionContext, config: NewsCrawlConfig) -> dict:
     context.log.info(f"run {run_id}, env {env}, zone '{zone(env)}'")
     budget = config.max_requests or (news.BACKFILL_BUDGET if config.backfill else news.DAILY_BUDGET)
     with crawler_log_to(context, news):
-        result = news.run(env, run_id, Lake(env), config.sites, config.backfill, config.interval, budget,
-                          config.max_minutes)
+        if config.replay:
+            result = news.replay(Lake(env), env, run_id)
+        else:
+            result = news.run(env, run_id, Lake(env), config.sites, config.backfill, config.interval, budget,
+                              config.max_minutes)
     if result["stopped"]:
         context.log.warning(result["stopped"])
     context.add_output_metadata({"run_id": run_id, "env": env, **result["report"]})

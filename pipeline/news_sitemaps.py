@@ -3,12 +3,12 @@
     .venv/bin/python -m pipeline.news_sitemaps                         # DEV: current and previous month
     .venv/bin/python -m pipeline.news_sitemaps --backfill              # DEV: every month not archived yet
     .venv/bin/python -m pipeline.news_sitemaps --site mmamania --dry-run
-    .venv/bin/python -m pipeline.news_sitemaps --replay-dir DIR        # parse saved XML; no requests
+    .venv/bin/python -m pipeline.news_sitemaps --replay                # re-parse the archive, load LANDING
+    .venv/bin/python -m pipeline.news_sitemaps --replay-dir DIR        # parse local XML; no upload
 
 Both sites are Vox Media's. Their robots.txt disallows Claude's agents; the
-owners agreed to an ongoing crawl of the sitemaps (experiments/news/README.md).
-So: sitemaps only, never an article page; an honest user agent naming the
-project and a contact; at least MIN_INTERVAL between request starts on a site;
+owners agreed to an ongoing crawl (experiments/news/README.md). So: sitemaps
+only here; an honest user agent naming the project; at least MIN_INTERVAL between request starts on a site;
 one run per site at a time (a lock in the lake, whatever the egress IP); and
 every response archived as served before anything is parsed from it.
 
@@ -17,8 +17,11 @@ carries the article's publication day and id:
 
     https://www.mmafighting.com/2020/10/24/21532169/khabib-nurmagomedov-announces-retirement-...
 
-<lastmod> is the last edit, not publication. Rows, one per <url>, go to
-LANDING lnd_news_urls: site, url, article_id, url_date, slug, lastmod, sitemap_month.
+Since the move to WordPress (2025-26) a URL has a section instead of the day
+(/ufc/513670/slug), and some entries are profile pages, not articles
+(/fighter/..., /fight/<a>-vs-<b>). <lastmod> is the last edit, not
+publication; a month's sitemap follows it. Rows, one per <url>, go to LANDING
+lnd_news_urls: site, url, section, article_id, url_date, slug, lastmod, sitemap_month.
 
 The daily run reads each site's current and previous month (4 requests): a
 month's sitemap grows until it ends, and an article can land a day late. The
@@ -46,8 +49,8 @@ SITES = {
 SITEMAP = "{base}/sitemaps/entries/{y}/{m}"
 FIRST_MONTH = {"mmafighting": (2003, 12), "mmamania": (2005, 1)}   # earlier than either's first sitemap
 
-USER_AGENT = "FightGrade-news/1.0 (private, non-commercial MMA research; sitemaps only; contact: {contact})"
-CONTACT = ""                # filled in once the sites' owners confirm the ongoing crawl
+# The project, by name; no contact, by the user's choice (2026-10-31).
+USER_AGENT = "FightGrade-news/1.0 (private, non-commercial MMA research)"
 
 TABLE = "news_urls"
 DBT_SELECT = "path:models/landing/news"
@@ -64,10 +67,12 @@ MAX_INDEX_PAGES = 20        # a month's sitemap split into pages: never more tha
 LOCK_STALE_HOURS = 3
 NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 
-# The day and the id, with or without a section before them; newer Vox URLs
-# may drop the date (/ufc/12345678/slug), so the id alone is the fallback.
-DATED_URL = re.compile(r"^https?://[^/]+/(?:[a-z0-9-]+/)*(\d{4})/(\d{1,2})/(\d{1,2})/(\d+)/([^/?#]+)/?$")
-UNDATED_URL = re.compile(r"^https?://[^/]+/(?:[a-z0-9-]+/)*(\d{5,})/([^/?#]+)/?$")
+# Vox's URLs until the sites moved to WordPress carry the day and the id:
+# /2020/10/24/21532169/slug. WordPress's carry a section and the id but no day:
+# /ufc/513670/slug, /fight/511505/a-vs-b, /<event hub>/476215/slug; for those,
+# lastmod stands in for the date downstream. `section` is the path before the id.
+DATED_URL = re.compile(r"^https?://[^/]+/((?:[a-z0-9-]+/)*?)(\d{4})/(\d{1,2})/(\d{1,2})/(\d+)/([^/?#]+)/?$")
+UNDATED_URL = re.compile(r"^https?://[^/]+/((?:[a-z0-9-]+/)*?)(\d{5,})/([^/?#]+)/?$")
 
 
 def log(msg: str) -> None:
@@ -100,10 +105,8 @@ class Fetcher:
     """One site's polite client: plain HTTP, the honest user agent, MIN_INTERVAL start to start."""
 
     def __init__(self, site: str, budget: Budget, interval: float):
-        if not CONTACT:
-            raise RuntimeError("no CONTACT set for the user agent: the crawl names one or does not run")
         self.site, self.budget, self.interval, self.last = site, budget, interval, 0.0
-        self.headers = {"User-Agent": USER_AGENT.format(contact=CONTACT), "Accept": "application/xml, text/xml"}
+        self.headers = {"User-Agent": USER_AGENT, "Accept": "application/xml, text/xml"}
 
     def get(self, url: str) -> tuple[int | str, bytes | None]:
         """(status, body). A transport error or timeout is 'FAIL'."""
@@ -155,11 +158,12 @@ def parse_sitemap(xml: bytes) -> tuple[str, list[dict]]:
 
 def url_row(site: str, loc: str, lastmod: str | None, sitemap_month: str) -> dict:
     """One sitemap entry as a row. url_date is NULL when the URL carries no day."""
-    row = {"site": site, "url": loc, "article_id": None, "url_date": None, "slug": None,
+    row = {"site": site, "url": loc, "section": None, "article_id": None, "url_date": None, "slug": None,
            "lastmod": lastmod, "sitemap_month": sitemap_month}
     m = DATED_URL.match(loc)
     if m:
-        y, mo, d, ident, slug = m.groups()
+        section, y, mo, d, ident, slug = m.groups()
+        row["section"] = section.strip("/") or None
         try:
             row["url_date"] = date(int(y), int(mo), int(d)).isoformat()
         except ValueError:
@@ -168,7 +172,7 @@ def url_row(site: str, loc: str, lastmod: str | None, sitemap_month: str) -> dic
         return row
     m = UNDATED_URL.match(loc)
     if m:
-        row.update(article_id=m.group(1), slug=m.group(2))
+        row.update(section=m.group(1).strip("/") or None, article_id=m.group(2), slug=m.group(3))
     return row
 
 
@@ -324,6 +328,30 @@ def nullcontext_true():
     yield True
 
 
+def replay(lake: Lake, env: str, run_id: str) -> dict:
+    """Re-parse the latest archived copy of every month (and its pages) in this
+    environment's zone, straight from the bucket. No requests to the sites: a
+    parser change is replayed, and PROD can be filled from a copy of DEV's archive."""
+    latest: dict[tuple[str, str], str] = {}
+    prefix = f"{zone(env)}raw-xml/news/"
+    for blob in lake.bucket.list_blobs(prefix=prefix):
+        if blob.name.endswith(".xml.gz"):
+            site, name = blob.name[len(prefix):].split("/", 1)[0], blob.name.rsplit("/", 1)[1][: -len(".xml.gz")]
+            if blob.name > latest.get((site, name), ""):          # fetch_date sorts as text
+                latest[(site, name)] = blob.name
+    run_dir, pages = RUNS / run_id, []
+    for (site, name), key in sorted(latest.items()):
+        local = run_dir / "raw" / site / f"{name}.xml.gz"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        lake.bucket.blob(key).download_to_filename(str(local))
+        pages.append((local, key))
+    rows, anomalies, counts = page_rows(pages)
+    log(f"replay: {len(pages)} sitemaps in {prefix} -> {len(rows):,} urls")
+    return {"fetch_date": date.today().isoformat(), "run_dir": str(run_dir), "pages": pages, "rows": {TABLE: rows},
+            "anomalies": anomalies, "missing": {}, "report": {**counts, "sitemaps_replayed": len(pages),
+            "rows": len(rows)}, "stopped": None, "replay": True}
+
+
 def replay_dir(src: Path, env: str, run_id: str) -> dict:
     """Parse sitemaps saved under src/<site>/<YYYY-MM>.xml(.gz), as if just fetched. No requests."""
     fetch_date, run_dir = date.today().isoformat(), RUNS / run_id
@@ -346,7 +374,7 @@ def replay_dir(src: Path, env: str, run_id: str) -> dict:
 def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
     """Raw XML first, then the Parquet, so no row points at an unarchived sitemap.
     A 404 month is recorded as an empty marker, so a backfill does not ask again."""
-    for local, key in result["pages"]:
+    for local, key in [] if result.get("replay") else result["pages"]:
         lake.upload_file(local, key, "application/gzip")
     for site, names in result.get("missing", {}).items():
         for name in names:
@@ -384,9 +412,6 @@ def verify(result: dict, staged: dict, run_dir: Path, env: str, lake: Lake | Non
                 if lake.size(parsed_key(f, run_dir, env)) != f.stat().st_size:
                     fails.append(f"Parquet missing or wrong size in bucket: {parsed_key(f, run_dir, env)}")
     fails += roundtrip_mismatches(result["rows"], staged)
-    undated = result["report"].get("urls_undated", 0)
-    if undated:
-        warns.append(f"{undated} article urls carry no date: url_date is NULL for them")
     if result["stopped"]:
         warns.append(result["stopped"])
     return {"fails": fails, "warns": warns}
@@ -415,6 +440,8 @@ def main() -> int:
     ap.add_argument("--max-requests", type=int, default=0, help=f"default {DAILY_BUDGET}, or {BACKFILL_BUDGET} for a backfill")
     ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES)
     ap.add_argument("--dry-run", action="store_true", help="fetch and archive locally; upload nothing")
+    ap.add_argument("--replay", action="store_true",
+                    help="re-parse the latest archived copy of every month and load LANDING; no requests")
     ap.add_argument("--replay-dir", type=Path, help="parse saved sitemaps (<dir>/<site>/<YYYY-MM>.xml); no requests")
     args = ap.parse_args()
     if args.interval < MIN_INTERVAL:
@@ -426,6 +453,9 @@ def main() -> int:
     lake = None if args.dry_run else Lake(env)
     if args.replay_dir:
         result = replay_dir(args.replay_dir, env, run_id)
+        lake = None                                 # local files: nothing of theirs belongs in the lake
+    elif args.replay:
+        result = replay(lake or Lake(env), env, run_id)
     else:
         if args.dry_run and args.backfill:
             log("dry run: the backfill cannot see the archive, so it plans every month")
@@ -434,13 +464,13 @@ def main() -> int:
     shutil.rmtree(run_dir / "tables", ignore_errors=True)
     shutil.rmtree(run_dir / "parsed", ignore_errors=True)
     staged = stage(result["rows"], run_dir, run_id)
-    if lake and not result.get("replay"):
+    if lake:
         n_pages, n_files = upload(lake, result, staged, run_dir, env)
-        log(f"uploaded {n_pages} sitemaps and {n_files} Parquet files")
-    checks = verify(result, staged, run_dir, env, None if args.dry_run or result.get("replay") else lake)
+        log(f"uploaded {0 if result.get('replay') else n_pages} sitemaps and {n_files} Parquet files")
+    checks = verify(result, staged, run_dir, env, lake)
     report = {"run_id": run_id, "env": env, "fetch_date": result["fetch_date"], "crawl": result["report"],
               "missing": result["missing"], **checks}
-    if lake and not result.get("replay") and not checks["fails"] and staged:
+    if lake and not checks["fails"] and staged:
         report["dbt_success"] = load_landing_cli(env)
         n = staged[TABLE][0]
         report["landing"] = {"parquet": n, "landing": landing_count(run_id, env)}

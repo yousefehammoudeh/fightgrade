@@ -31,7 +31,8 @@
 
 ## Rules
 
-Honest user agent naming the project and contact; ≥ 6 s between requests per site; one lock per
+Honest user agent naming the project (`FightGrade-news/1.0 (private, non-commercial MMA research)`;
+no contact, by choice); ≥ 6 s between requests per site; one lock per
 site, as `pipeline/tapology.py` does; raw responses archived before parsing. Sitemaps only, plus
 article pages solely for step 6's fight-week timestamps, keeping nothing from a page but
 `published_time`. No browser, no user-agent spoofing. Any new site needs its own permission.
