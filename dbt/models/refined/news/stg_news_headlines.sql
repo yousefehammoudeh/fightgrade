@@ -8,8 +8,8 @@
 -- lastmod's day stands in (date_source = 'lastmod'), which is the last edit.
 {% set families = {
     'retirement': "retir|hang(s|ing)? up (the|his|her) gloves|calls? (it )?a career|final fight|last fight|farewell|walks? away|step(s|ping)? away from|comeback|come back|return|back in the (octagon|cage)|un ?retir",
-    'withdrawal': "withdr|pulls? out|pulled|out of|forced out|injur|hurt|scrap|cancel|off (the |of )?(card|fight|ufc|bout)|postpone|falls? (apart|through)|fell (apart|through|off)|nixed|axed|illness|sick|hospital|visa|deleted",
-    'replacement': "replac|steps? in|stepping in|short ?notice|late ?notice|new opponent|fill(s|ing)? in|late change",
+    'withdrawal': "withdr|pulls? out|pulled|out of|forced out|injur|hurt|scrap|cancel|off (the |of )?(card|fight|ufc|bout)|postpone|falls? (apart|through)|fell (apart|through|off)|nixed|axed|illness|sick|hospital|visa|deleted|scratched",
+    'replacement': "replac|steps? in|stepping in|short ?notice|late ?notice|(days?|weeks?) notice|swoops? in|new opponent|fill(s|ing)? in|late change",
     'weight_miss': "miss(es|ed)? weight|weight miss|miss(es|ed)? (the )?mark|overweight|catch ?weight|weigh ?ins?|on the scale|weight cut|hydration",
     'suspension': "suspen|usada|drug test|test(s|ed)? positive|positive test|flagged|banned|ban for|doping|adverse|steroid|nsac|commission|wada|ped",
     'release': "releas|cut from|cut by|parts? ways|parted ways|let go|free agent|signs|signed|signing|inks|new deal|contract|debut",
