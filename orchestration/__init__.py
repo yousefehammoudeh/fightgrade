@@ -42,6 +42,11 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    run per shard of the plan; no schedule. It reaches the bouts
                    the event crawl cannot: those with no event page. Its LANDING
                    table is loaded by the PROD build after it.
+  news_crawl       MMA Fighting's and MMA Mania's monthly sitemaps -> lake
+                   -> LANDING (orchestration/news.py). Daily at 05:00, after
+                   Tapology's 02:00 run and its build: each site's current and
+                   previous month, 4 requests. A backfill=true run reads every
+                   month not archived yet.
 
 A crawl that stops before archiving anything fails, and the crawl_retry sensor
 launches it again with the same config: Serverless gives each run one of 3
@@ -81,10 +86,11 @@ from .tapology import RETRY_ON_ANOTHER_IP, tapology_crawl
 from .tapology_fighters import tapology_fighter_crawl
 from .judge_lens import judge_lens_train
 from .mmadecisions import mmadecisions_crawl
+from .news import news_crawl
 from .ufcstats import ufcstats_crawl
 
 TIMEZONE = "America/Toronto"
-DAILY_0200, SUNDAY_0600 = "0 2 * * *", "0 6 * * 0"
+DAILY_0200, DAILY_0500, SUNDAY_0600 = "0 2 * * *", "0 5 * * *", "0 6 * * 0"
 ON_PROD = IN_DAGSTER_PLUS and not IS_BRANCH_DEPLOYMENT
 SCHEDULE_STATUS = DefaultScheduleStatus.RUNNING if ON_PROD else DefaultScheduleStatus.STOPPED
 SENSOR_STATUS = DefaultSensorStatus.RUNNING if ON_PROD else DefaultSensorStatus.STOPPED
@@ -158,7 +164,7 @@ def judge_lens_after_build(context: RunStatusSensorContext) -> RunRequest:
     return RunRequest(run_key=context.dagster_run.run_id)
 
 
-CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl]
+CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl, news_crawl]
 IP_RETRY_TAG = "fightgrade/ip_retry"
 # With one refused IP in three, four misses in a row is about one night in 80.
 MAX_IP_RETRIES = 3
@@ -225,6 +231,12 @@ defs = Definitions(
         ScheduleDefinition(
             job=ufcstats_crawl,
             cron_schedule=SUNDAY_0600,
+            execution_timezone=TIMEZONE,
+            default_status=SCHEDULE_STATUS,
+        ),
+        ScheduleDefinition(
+            job=news_crawl,
+            cron_schedule=DAILY_0500,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
