@@ -1,0 +1,19 @@
+version: 2
+
+# MMA news (pipeline/news_sitemaps.py): the article URLs MMA Fighting and MMA
+# Mania list in their monthly sitemaps.
+models:
+  - name: cln_news_urls
+    description: >
+      One row per URL per site, from its newest sitemap read. news_url_id is
+      site:era:article_id; era 'vox' is a dated Vox URL, 'wp' a WordPress one
+      (2025-26 on), which has a section and no day. A slug edited after
+      publication is kept as last listed.
+    columns:
+      - name: news_url_id
+        data_tests: [unique, not_null]
+      - name: site
+        data_tests:
+          - accepted_values: {arguments: {values: [mmafighting, mmamania]}}
+      - name: url
+        data_tests: [not_null]
