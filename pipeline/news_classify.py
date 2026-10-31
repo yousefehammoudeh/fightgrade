@@ -149,6 +149,43 @@ EXAMPLES = [
 ]
 
 
+ARTICLE_PROMPT_VERSION = "a1"
+# a1 (2026-10-31): the article, for headlines the slug pass flags (pipeline/news_articles.py).
+ARTICLE_SYSTEM = SYSTEM.replace(
+    "You label MMA news headlines. Each headline is an article's URL slug turned into words: lower case, no "
+    "punctuation, apostrophes dropped. It may be cut off mid-sentence. Read only the headline.",
+    "You label MMA news articles. You get the headline, the description and the start of the article. Label "
+    "the event the headline is about, as the article reports it. The article settles who it happens to: a "
+    "headline can name several fighters, and fighters lists only the one(s) the event happens to (for a "
+    "retirement, whoever retires; a reaction or a statement by someone else does not make them retire). It "
+    "settles fact or talk: a retirement announced for after a named, booked last fight is confirmed; a vague "
+    "plan (\"in two or three years\", \"soon\", \"maybe\") is speculative; \"won't retire\" is denied.")
+ARTICLE_EXAMPLES = [
+    ("Ivo Marsh reacts to Tom Brask's retirement", "Ivo Marsh says rival Tom Brask leaving MMA is a loss.",
+     "Ivo Marsh paid tribute on Monday to Tom Brask, who announced his retirement after UFC 900.",
+     _label("retirement", fighters=["tom brask"], event="ufc 900")),
+    ("Ana Pell: 'I'll retire in a few years'", "The champion is thinking about the end.",
+     "Ana Pell says she plans to fight on for two or three more years before she retires.",
+     _label("retirement", "speculative", ["ana pell"])),
+    ("Bo Crane will retire after Rafa Kell fight", "UFC 903 will be his last.",
+     "Bo Crane confirmed Tuesday that his bout with Rafa Kell at UFC 903 will be the final fight of his career.",
+     _label("retirement", fighters=["bo crane"], opponent="rafa kell", event="ufc 903")),
+    ("Sid Moor's new opponent announced for UFC 904", "A newcomer steps in.",
+     "Pat Lune will now face Sid Moor at UFC 904. Lune replaces Ken Vale, who withdrew with a knee injury.",
+     _label("replacement", fighters=["pat lune"], replaced="ken vale", opponent="sid moor", event="ufc 904",
+            reason="injury")),
+]
+
+
+def article_message(a: dict) -> str:
+    return (f"Headline: {a.get('headline') or ''}\nPublished: {a.get('date_published') or 'unknown'} on "
+            f"{a.get('site') or 'unknown'}\nDescription: {a.get('description') or ''}\n"
+            f"Article: {(a.get('body') or '')[:ARTICLE_CHARS]}")
+
+
+ARTICLE_CHARS = 1500
+
+
 def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
@@ -165,13 +202,22 @@ def messages(headline: str, published_date: str | None, site: str | None) -> lis
     return out + [{"role": "user", "content": user_message(headline, published_date, site)}]
 
 
-def ask(model: str, headline: str, published_date: str | None = None, site: str | None = None) -> dict:
-    """One headline -> {'answer': parsed JSON or None, 'raw': the model's text, 'seconds'}.
-    A model named '<name>+think' lets a reasoning model think before it answers."""
+def article_messages(a: dict) -> list[dict]:
+    out = [{"role": "system", "content": ARTICLE_SYSTEM}]
+    for h, d, b, label in ARTICLE_EXAMPLES:
+        out += [{"role": "user", "content": article_message({"headline": h, "description": d, "body": b})},
+                {"role": "assistant", "content": json.dumps(label)}]
+    return out + [{"role": "user", "content": article_message(a)}]
+
+
+def ask(model: str, headline: str, published_date: str | None = None, site: str | None = None,
+        article: dict | None = None) -> dict:
+    """One headline, or with `article` one article -> {'answer': parsed JSON or None, 'raw': the
+    model's text, 'seconds'}. A model named '<name>+think' lets a reasoning model think first."""
     think = model.endswith("+think")
     body = {"model": model.removesuffix("+think"), "stream": False, "format": SCHEMA, "think": think,
             "options": {"temperature": 0, "seed": 0, "num_predict": 2000 if think else 200},
-            "messages": messages(headline, published_date, site)}
+            "messages": article_messages(article) if article else messages(headline, published_date, site)}
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
@@ -184,15 +230,19 @@ def ask(model: str, headline: str, published_date: str | None = None, site: str 
     return {"answer": answer, "raw": raw, "seconds": round(time.time() - t0, 3)}
 
 
-def classify(rows: list[dict], model: str, workers: int = WORKERS) -> list[dict]:
-    """rows: {news_url_id, headline, published_date, site} -> one answer row each, in order."""
+def classify(rows: list[dict], model: str, workers: int = WORKERS, articles: bool = False) -> list[dict]:
+    """rows: {news_url_id, headline, published_date, site} -> one answer row each, in order.
+    With articles, each row also carries its article (headline, description, body,
+    date_published) and is read by the article prompt."""
+    version = ARTICLE_PROMPT_VERSION if articles else PROMPT_VERSION
+
     def one(r):
         try:
-            got = ask(model, r["headline"], r.get("published_date"), r.get("site"))
+            got = ask(model, r["headline"], r.get("published_date"), r.get("site"), r if articles else None)
         except OSError as e:
             got = {"answer": None, "raw": f"ERROR {type(e).__name__}: {e}", "seconds": None}
         a = got["answer"] or {}
-        return {"news_url_id": r["news_url_id"], "model": model, "prompt_version": PROMPT_VERSION,
+        return {"news_url_id": r["news_url_id"], "model": model, "prompt_version": version,
                 "classified_on": date.today().isoformat(), "event_type": a.get("event_type"),
                 "status": a.get("status"), "fighters": a.get("fighters") or [],
                 "replaced_fighter": a.get("replaced_fighter") or None, "opponent": a.get("opponent") or None,
@@ -298,6 +348,51 @@ def evaluate(models: list[str], workers: int, out_dir: Path, env: str = "dev") -
     return report
 
 
+FLAG_TYPES = ("retirement", "return", "withdrawal", "replacement")    # what the slug pass sends to the article pass
+
+
+def flagged(answer: dict) -> bool:
+    return answer.get("event_type") in FLAG_TYPES and not answer.get("not_mma")
+
+
+def gold_articles(env: str) -> dict[str, dict]:
+    """The newest parsed article for each gold headline, from LANDING."""
+    cur = snowflake_cursor(env)
+    db = f"FIGHTGRADE_{env.upper()}"
+    cur.execute(f"""select payload from {db}.LANDING.LND_NEWS_ARTICLES
+                    where payload:news_url_id::varchar in (select news_url_id from {db}.LANDING.NEWS_EVENT_LABELS)
+                    qualify row_number() over (partition by payload:news_url_id order by _loaded_at desc) = 1""")
+    return {a["news_url_id"]: a for a in (json.loads(r[0]) for r in cur.fetchall())}
+
+
+def evaluate_pipeline(model: str, slug_answers: Path, workers: int, out_dir: Path, env: str = "dev") -> dict:
+    """Both stages on the gold set: the slug answers in `slug_answers` (an --eval run's JSONL
+    for this model), then the article pass on every flagged headline whose page was read.
+    The article's answer replaces the slug's; every other headline keeps the slug's."""
+    marked = current_candidates(env)
+    gold = [{**g, "is_candidate": g["news_url_id"] in marked} for g in read_gold()]
+    slug = {json.loads(l)["news_url_id"]: json.loads(l) for l in slug_answers.read_text().splitlines() if l}
+    for a in slug.values():
+        a.setdefault("not_mma", not_mma(next((g["headline"] for g in gold if g["news_url_id"] == a["news_url_id"]), "")))
+    pages = gold_articles(env)
+    todo = [{**pages[i], "headline": pages[i]["headline"] or "", "site": pages[i]["site"]}
+            for i, a in slug.items() if flagged(a) and i in pages]
+    log(f"{sum(flagged(a) for a in slug.values())} gold headlines flagged by the slug pass, {len(todo)} with a page read")
+    t0 = time.time()
+    rows = classify(todo, model, workers, articles=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{model.replace(':', '_')}_articles.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    final = {**slug, **{r["news_url_id"]: r for r in rows if r["event_type"]}}
+    random400 = [g for g in gold if not g["stratum"].startswith("ext_")]
+    report = {"seconds_per_article": round((time.time() - t0) / max(len(rows), 1), 2), "articles": len(rows),
+              "random400": bar_summary(score(random400, final)), "all600": bar_summary(score(gold, final)),
+              "slug_only_random400": bar_summary(score(random400, slug)), "slug_only_all600": bar_summary(score(gold, slug)),
+              "all_types_600": {k: {kk: (round(vv, 3) if isinstance(vv, float) else vv) for kk, vv in v.items()}
+                                for k, v in score(gold, final).items()}}
+    (out_dir / "pipeline_report.json").write_text(json.dumps(report, indent=1))
+    return report
+
+
 # ---------------------------------------------------------------- production
 
 PENDING = """
@@ -372,6 +467,8 @@ def load_landing_cli(env: str) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--eval", action="store_true", help="score the models on the gold set; nothing is uploaded")
+    ap.add_argument("--eval-articles", type=Path, metavar="SLUG_JSONL",
+                    help="score both stages on the gold set, from an --eval run's slug answers for --model")
     ap.add_argument("--model", action="append", help=f"default: {MODEL}; with --eval, all of {', '.join(MODELS)}")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=WORKERS)
@@ -379,6 +476,11 @@ def main() -> int:
     args = ap.parse_args()
 
     run_id = new_run_id()
+    if args.eval_articles:
+        report = evaluate_pipeline((args.model or [MODEL])[0], args.eval_articles, args.workers,
+                                   RUNS / f"eval-articles-{run_id}", environment())
+        print(json.dumps({k: v for k, v in report.items() if k != "all_types_600"}, indent=1))
+        return 0
     if args.eval:
         report = evaluate(args.model or list(MODELS), args.workers, RUNS / f"eval-{run_id}", environment())
         print(json.dumps({m: {"bar": r["bar"], "seconds_per_headline": r["seconds_per_headline"],

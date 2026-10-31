@@ -32,10 +32,12 @@
 ## Rules
 
 Honest user agent naming the project (`FightGrade-news/1.0 (private, non-commercial MMA research)`;
-no contact, by choice); ≥ 6 s between requests per site; one lock per
-site, as `pipeline/tapology.py` does; raw responses archived before parsing. Sitemaps only, plus
-article pages solely for step 6's fight-week timestamps, keeping nothing from a page but
-`published_time`. No browser, no user-agent spoofing. Any new site needs its own permission.
+no contact, by choice); ≥ 6 s between requests per site; one lock per site, as `pipeline/tapology.py`
+does, shared by the sitemap and article crawls; raw responses archived before parsing. Sitemaps,
+plus article pages where a headline cannot settle the question: the owners agreed to article text
+"when necessary" (the user, 2026-10-31), so only the pages behind headlines the classifier flags
+as a retirement, return, withdrawal or replacement are read (`pipeline/news_articles.py`). No
+browser, no user-agent spoofing. Any new site needs its own permission.
 
 ## Build plan
 
