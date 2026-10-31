@@ -84,7 +84,8 @@ that event with `fighters` set to whom it happened to, and the status the headli
 
 ## The sample
 
-400 headlines, drawn deterministically (`order by sha2(news_url_id || 'gold-v1')`):
+600 headlines. The first 400 are a stratified random sample, drawn deterministically
+(`order by sha2(news_url_id || 'gold-v1')`):
 
 | year | candidates | non-candidates | why |
 |---|---|---|---|
@@ -92,6 +93,12 @@ that event with `fighters` set to whom it happened to, and the status the headli
 | 2015 | 100 | 40 | the middle |
 | 2025 | 100 | 40 | Vox to WordPress (2025-08-05) |
 | 2026 | 30 | 10 | WordPress only: what the daily run sees |
+
+The other 200 (`stratum = ext_<year>_cand`, `sha2(news_url_id || 'gold-v2')`) are candidates
+from 2009-2026 whose keyword families include retirement, withdrawal or replacement, added
+because the random 400 held too few of the bar's types (17, 20 and 13 confirmed) to tell 0.9
+from 0.8. They are richer in events than the population, so they flatter precision: the
+random 400 are the honest estimate, the 600 the tighter one.
 
 ## The bar
 
