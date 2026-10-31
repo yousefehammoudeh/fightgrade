@@ -46,6 +46,11 @@ the gold set must not either.
 Rulings made while drafting (2026-10-31), so the same case always gets the same label:
 
 - **A failed drug test** is `suspension` with `reason=doping`, before any ban is announced.
+- **A withdrawal or replacement is `confirmed` only for a bout that was booked.** A plan or talks
+  ("was set to face Prochazka before the Strickland swerve", "in talks to replace") is
+  `speculative`. The user's ruling, 2026-10-31: Chimaev vs Prochazka was never confirmed, and
+  Tapology has no such cancelled bout. The headline label is what the headline claims; whether
+  it happened is settled against the fight data (README, step 6).
 - **A replacement need not name the new fighter**: "X gets new opponent", "newcomer swoops in on
   four days notice" are `replacement`. "X pulled, replacement being looked for" is `withdrawal`.
 - **Injury news with no bout named as lost** ("breaks hand in training", "injury update ... UFC
