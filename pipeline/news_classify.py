@@ -149,8 +149,9 @@ EXAMPLES = [
 ]
 
 
-ARTICLE_PROMPT_VERSION = "a1"
+ARTICLE_PROMPT_VERSION = "a2"
 # a1 (2026-10-31): the article, for headlines the slug pass flags (pipeline/news_articles.py).
+# a2: the gold set's last-fight, withdrawal and replacement rules spelled out for articles.
 ARTICLE_SYSTEM = SYSTEM.replace(
     "You label MMA news headlines. Each headline is an article's URL slug turned into words: lower case, no "
     "punctuation, apostrophes dropped. It may be cut off mid-sentence. Read only the headline.",
@@ -159,7 +160,13 @@ ARTICLE_SYSTEM = SYSTEM.replace(
     "headline can name several fighters, and fighters lists only the one(s) the event happens to (for a "
     "retirement, whoever retires; a reaction or a statement by someone else does not make them retire). It "
     "settles fact or talk: a retirement announced for after a named, booked last fight is confirmed; a vague "
-    "plan (\"in two or three years\", \"soon\", \"maybe\") is speculative; \"won't retire\" is denied.")
+    "plan (\"in two or three years\", \"soon\", \"maybe\") is speculative; \"won't retire\" is denied. "
+    "Whatever the headline's form (a weigh-in result, a staredown video, a card announcement), if the article "
+    "says the bout is a fighter's last or retirement fight, the event is a confirmed retirement. A bout "
+    "scratched, pulled, cancelled or postponed is a confirmed withdrawal, even when the reason is undisclosed "
+    "or a new opponent is only being sought or called for. A fighter named as the replacement, stepping in or "
+    "up on short notice, or taking a new opponent after a withdrawal is a replacement, not a booking. An injury "
+    "or rumour that the article says is false is denied.")
 ARTICLE_EXAMPLES = [
     ("Ivo Marsh reacts to Tom Brask's retirement", "Ivo Marsh says rival Tom Brask leaving MMA is a loss.",
      "Ivo Marsh paid tribute on Monday to Tom Brask, who announced his retirement after UFC 900.",
@@ -175,6 +182,19 @@ ARTICLE_EXAMPLES = [
      _label("replacement", fighters=["pat lune"], replaced="ken vale", opponent="sid moor", event="ufc 904",
             reason="injury")),
 ]
+
+
+ARTICLE_MIN_CHARS = 200     # a shorter body (an empty media-call page, an abridged 2011 post): keep the slug's answer
+
+
+def article_not_mma(a: dict) -> bool:
+    """The not-MMA filter over the article's own headline, description and opening."""
+    return not_mma(" ".join(clean_words(x) for x in (a.get("headline"), a.get("description"),
+                                                     (a.get("body") or "")[:400], a.get("section"))))
+
+
+def clean_words(text: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower().replace("'", "").replace("\u2019", ""))
 
 
 def article_message(a: dict) -> str:
@@ -247,7 +267,8 @@ def classify(rows: list[dict], model: str, workers: int = WORKERS, articles: boo
                 "status": a.get("status"), "fighters": a.get("fighters") or [],
                 "replaced_fighter": a.get("replaced_fighter") or None, "opponent": a.get("opponent") or None,
                 "event": a.get("event") or None, "reason": a.get("reason") or None,
-                "not_mma": not_mma(r["headline"]), "raw": got["raw"], "seconds": got["seconds"]}
+                "not_mma": article_not_mma(r) if articles else not_mma(r["headline"]),
+                "raw": got["raw"], "seconds": got["seconds"]}
     t0, out = time.time(), []
     with ThreadPoolExecutor(workers) as pool:
         for i, row in enumerate(pool.map(one, rows), 1):
@@ -275,7 +296,7 @@ def score(gold: list[dict], pred: dict[str, dict], candidates_only: bool = True)
     tp, fp, fn = Counter(), Counter(), Counter()
     for g in gold:
         p = pred.get(g["news_url_id"], {})
-        if (candidates_only and not g["is_candidate"]) or not_mma(g["headline"]):
+        if (candidates_only and not g["is_candidate"]) or not_mma(g["headline"]) or p.get("not_mma"):
             p = {}
         want, got = key(g["event_type"], g["status"]), key(p.get("event_type"), p.get("status"))
         if want == got:
@@ -376,13 +397,14 @@ def evaluate_pipeline(model: str, slug_answers: Path, workers: int, out_dir: Pat
         a.setdefault("not_mma", not_mma(next((g["headline"] for g in gold if g["news_url_id"] == a["news_url_id"]), "")))
     pages = gold_articles(env)
     todo = [{**pages[i], "headline": pages[i]["headline"] or "", "site": pages[i]["site"]}
-            for i, a in slug.items() if flagged(a) and i in pages]
+            for i, a in slug.items() if flagged(a) and i in pages and (pages[i]["body_chars"] or 0) >= ARTICLE_MIN_CHARS]
     log(f"{sum(flagged(a) for a in slug.values())} gold headlines flagged by the slug pass, {len(todo)} with a page read")
     t0 = time.time()
     rows = classify(todo, model, workers, articles=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{model.replace(':', '_')}_articles.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    final = {**slug, **{r["news_url_id"]: r for r in rows if r["event_type"]}}
+    final = {**slug, **{r["news_url_id"]: ({**r, "event_type": "none"} if r["not_mma"] else r)
+                        for r in rows if r["event_type"]}}
     random400 = [g for g in gold if not g["stratum"].startswith("ext_")]
     report = {"seconds_per_article": round((time.time() - t0) / max(len(rows), 1), 2), "articles": len(rows),
               "random400": bar_summary(score(random400, final)), "all600": bar_summary(score(gold, final)),
@@ -419,7 +441,35 @@ def pending(env: str, model: str) -> list[dict]:
     return [dict(zip(("news_url_id", "headline", "published_date", "site"), r)) for r in cur.fetchall()]
 
 
-def run(env: str, run_id: str, model: str, limit: int, workers: int) -> dict:
+PENDING_ARTICLES = """
+select a.payload, h.headline as slug_headline
+from {DB}.LANDING.LND_NEWS_ARTICLES a
+join {DB}.REFINED.STG_NEWS_HEADLINES h on h.news_url_id = a.payload:news_url_id::varchar
+where a.payload:body_chars::int >= %s
+  and not exists (select 1 from {DB}.LANDING.LND_NEWS_EVENTS e
+                  where e.payload:news_url_id::varchar = a.payload:news_url_id::varchar
+                    and e.payload:model::varchar = %s and e.payload:prompt_version::varchar = %s)
+qualify row_number() over (partition by a.payload:news_url_id order by a._loaded_at desc) = 1
+order by a.payload:date_published::varchar desc
+"""
+
+
+def pending_articles(env: str, model: str) -> list[dict]:
+    cur = snowflake_cursor(env)
+    cur.execute(PENDING_ARTICLES.replace("{DB}", f"FIGHTGRADE_{env.upper()}"), (ARTICLE_MIN_CHARS, model, ARTICLE_PROMPT_VERSION))
+    return [{**json.loads(p), "slug_headline": h} for p, h in cur.fetchall()]
+
+
+def run(env: str, run_id: str, model: str, limit: int, workers: int, articles: bool = False) -> dict:
+    if articles:
+        todo = pending_articles(env, model)[: limit or None]
+        log(f"{len(todo):,} articles to classify with {model} {ARTICLE_PROMPT_VERSION}")
+        rows = classify(todo, model, workers, articles=True)
+        today = date.today().isoformat()
+        for r in rows:
+            r["_raw_html_key"], r["fetch_date"] = None, today
+        return {"run_dir": str(RUNS / run_id), "rows": {TABLE: rows},
+                "report": dict(Counter(r["event_type"] or "unparsed" for r in rows), classified=len(rows))}
     todo = pending(env, model)
     if limit:
         todo = todo[:limit]
@@ -471,6 +521,8 @@ def main() -> int:
                     help="score both stages on the gold set, from an --eval run's slug answers for --model")
     ap.add_argument("--model", action="append", help=f"default: {MODEL}; with --eval, all of {', '.join(MODELS)}")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--articles", action="store_true",
+                    help=f"classify the articles read (lnd_news_articles) with prompt {ARTICLE_PROMPT_VERSION}, not the slugs")
     ap.add_argument("--workers", type=int, default=WORKERS)
     ap.add_argument("--dry-run", action="store_true", help="classify and stage locally; upload nothing")
     args = ap.parse_args()
@@ -490,12 +542,14 @@ def main() -> int:
     env = environment()
     model = (args.model or [MODEL])[0]
     run_dir = RUNS / run_id
-    log(f"run {run_id} env={env} zone='{zone(env)}' model={model} prompt={PROMPT_VERSION}")
-    result = run(env, run_id, model, args.limit, args.workers)
+    log(f"run {run_id} env={env} zone='{zone(env)}' model={model} "
+        f"prompt={ARTICLE_PROMPT_VERSION if args.articles else PROMPT_VERSION}")
+    result = run(env, run_id, model, args.limit, args.workers, args.articles)
     shutil.rmtree(run_dir / "tables", ignore_errors=True)
     shutil.rmtree(run_dir / "parsed", ignore_errors=True)
     staged = stage(result["rows"], run_dir, run_id)
-    report = {"run_id": run_id, "env": env, "model": model, "prompt_version": PROMPT_VERSION, **result["report"],
+    report = {"run_id": run_id, "env": env, "model": model,
+              "prompt_version": ARTICLE_PROMPT_VERSION if args.articles else PROMPT_VERSION, **result["report"],
               "fails": []}
     if not args.dry_run and staged:
         lake = Lake(env)
