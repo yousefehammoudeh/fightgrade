@@ -424,6 +424,50 @@ def landing_count(run_id: str, env: str) -> int:
     return cur.fetchone()[0]
 
 
+# DEV-only while the news models are unmerged: resync_dev_from_prod (after every PROD
+# build) drops DEV tables PROD lacks. Every one rebuilds from the lake, so a run that
+# reads them rebuilds what is missing first. Once merged, PROD has them and this is a no-op.
+NEWS_TABLES = {"LANDING": ("LND_NEWS_URLS", "LND_NEWS_EVENTS", "LND_NEWS_ARTICLES", "NEWS_EVENT_LABELS"),
+               "CLEANSING": ("CLN_NEWS_URLS",), "REFINED": ("STG_NEWS_HEADLINES",)}
+NEWS_REBUILD = "path:models/landing/news cln_news_urls stg_news_headlines news_event_labels"
+REBUILD_LOCK = "state/news/dev_rebuild.json"
+
+
+def ensure_dev_tables(env: str, lake: Lake | None = None) -> None:
+    """Rebuild the news tables in DEV from the lake if a resync dropped any. One rebuild at a
+    time (a lock in the lake); a run that finds the lock held waits for it, then re-checks."""
+    if env != "dev":
+        return
+    from dbt.cli.main import dbtRunner
+
+    def missing() -> list[str]:
+        cur = snowflake_cursor(env)
+        cur.execute("select table_schema || '.' || table_name from FIGHTGRADE_DEV.INFORMATION_SCHEMA.TABLES "
+                    "where table_schema in ('LANDING', 'CLEANSING', 'REFINED')")
+        have = {r[0] for r in cur.fetchall()}
+        return [f"{sch}.{t}" for sch, ts in NEWS_TABLES.items() for t in ts if f"{sch}.{t}" not in have]
+
+    lake = lake or Lake(env)
+    for _ in range(60):
+        gone = missing()
+        if not gone:
+            return
+        if lake.create(REBUILD_LOCK, {"since": time.time()}) or (lake.age_seconds(REBUILD_LOCK) or 0) > 1800:
+            try:
+                log(f"DEV lacks {', '.join(gone)} (a resync drops DEV-only tables): rebuilding from the lake")
+                res = dbtRunner().invoke(["build", "--select", NEWS_REBUILD, "--indirect-selection", "cautious",
+                                          "--target", env, "--project-dir",
+                                          str(ROOT / "dbt"), "--profiles-dir", str(Path("~/.dbt").expanduser())])
+                if not res.success:
+                    raise RuntimeError(f"dbt build --select {NEWS_REBUILD} failed")
+            finally:
+                lake.delete(REBUILD_LOCK)
+            continue
+        log("another run is rebuilding the DEV news tables; waiting")
+        time.sleep(30)
+    raise RuntimeError("the DEV news tables are still missing after 30 minutes")
+
+
 def load_landing_cli(env: str) -> bool:
     from dbt.cli.main import dbtRunner
 

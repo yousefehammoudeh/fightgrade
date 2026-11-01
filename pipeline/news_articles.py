@@ -169,6 +169,8 @@ where e.event_type in ({TYPES})
 
 
 def select(env: str, gold: bool, model: str | None = None, prompt_version: str | None = None) -> list[dict]:
+    from .news_sitemaps import ensure_dev_tables
+    ensure_dev_tables(env)
     cur = snowflake_cursor(env)
     db = f"FIGHTGRADE_{env.upper()}"
     if gold:

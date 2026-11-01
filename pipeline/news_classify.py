@@ -429,6 +429,8 @@ order by h.published_date desc
 
 
 def pending(env: str, model: str) -> list[dict]:
+    from .news_sitemaps import ensure_dev_tables
+    ensure_dev_tables(env)
     cur = snowflake_cursor(env)
     cur.execute(f"select count(*) from FIGHTGRADE_{env.upper()}.INFORMATION_SCHEMA.TABLES "
                 f"where table_schema = 'LANDING' and table_name = 'LND_NEWS_EVENTS'")
@@ -455,6 +457,8 @@ order by a.payload:date_published::varchar desc
 
 
 def pending_articles(env: str, model: str) -> list[dict]:
+    from .news_sitemaps import ensure_dev_tables
+    ensure_dev_tables(env)
     cur = snowflake_cursor(env)
     cur.execute(PENDING_ARTICLES.replace("{DB}", f"FIGHTGRADE_{env.upper()}"), (ARTICLE_MIN_CHARS, model, ARTICLE_PROMPT_VERSION))
     return [{**json.loads(p), "slug_headline": h} for p, h in cur.fetchall()]
