@@ -16,10 +16,19 @@ PROMPT_VERSION that produced it: lnd_news_events. A headline is classified once
 per (model, prompt version), so a run only reads candidates with no answer yet,
 and a new prompt version re-reads them all. int_news_events keeps the answers
 of the chosen model and version.
+
+The daily run is the Dagster job news_classify (orchestration/news.py). The image
+carries Ollama, CPU only; model_server() starts it and pulls the model, checked
+against MODEL_DIGEST, so a day's answers come from the very weights the backfill
+used. On CPU (a Serverless run's 4 vCPUs) a headline takes ~10 s and an article
+~20 s; the same weights on a laptop's GPU agree on the event type and status for
+69 of 70 headlines and articles, and on every field for 65 (floating point
+differs between the two).
 """
-import argparse, csv, json, os, re, shutil, sys, time, urllib.request
+import argparse, csv, json, os, re, shutil, subprocess, sys, time, urllib.request
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -34,6 +43,9 @@ DBT_SELECT = "lnd_news_events"
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODEL = "qwen3:4b"
+# The weights the backfill ran on (Ollama's manifest digest). A tag on the registry
+# can move; a pull that brings other weights fails instead of classifying with them.
+MODEL_DIGEST = {"qwen3:4b": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7"}
 MODELS = ("llama3.2:3b", "qwen3:4b", "gemma3:4b")
 WORKERS = 4                 # requests in flight; Ollama serves OLLAMA_NUM_PARALLEL of them at once
 TIMEOUT = 120
@@ -248,6 +260,70 @@ def ask(model: str, headline: str, published_date: str | None = None, site: str 
     except json.JSONDecodeError:
         answer = None
     return {"answer": answer, "raw": raw, "seconds": round(time.time() - t0, 3)}
+
+
+def _ollama(path: str, body: dict | None = None, timeout: float = 10) -> dict:
+    req = urllib.request.Request(f"{OLLAMA}{path}", data=json.dumps(body).encode() if body else None,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _up() -> bool:
+    try:
+        _ollama("/api/version", timeout=2)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def model_server(model: str = MODEL, log_path: Path | None = None):
+    """Ollama serving `model`, with the weights in MODEL_DIGEST. A server already up (a
+    laptop's) is used as it is; otherwise `ollama serve` is started here, the model is
+    pulled from Ollama's registry if this disk lacks it, and the server stops on exit.
+    The model is loaded before this yields, so no headline waits for it."""
+    proc, out = None, None
+    if not _up():
+        host = OLLAMA.split("://", 1)[-1]
+        env = {**os.environ, "OLLAMA_HOST": host, "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_KEEP_ALIVE": "30m"}
+        if log_path:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        out = open(log_path, "ab") if log_path else None
+        proc = subprocess.Popen(["ollama", "serve"], env=env, stdout=out or subprocess.DEVNULL,
+                                stderr=subprocess.STDOUT)
+        for _ in range(60):
+            if _up():
+                break
+            if proc.poll() is not None:
+                raise RuntimeError(f"ollama serve exited with {proc.returncode}")
+            time.sleep(1)
+        else:
+            raise RuntimeError("ollama serve did not answer in 60 s")
+    try:
+        log(f"ollama {_ollama('/api/version')['version']} at {OLLAMA}")
+        have = {m["name"]: m["digest"] for m in _ollama("/api/tags")["models"]}
+        if model not in have:
+            t0 = time.time()
+            res = _ollama("/api/pull", {"model": model, "stream": False}, timeout=1800)
+            log(f"pulled {model}: {res.get('status')} in {time.time() - t0:.0f} s")
+            have = {m["name"]: m["digest"] for m in _ollama("/api/tags")["models"]}
+        want = MODEL_DIGEST.get(model)
+        if want and have.get(model) != want:
+            raise RuntimeError(f"{model} is {have.get(model)}, not the backfill's {want}")
+        t0 = time.time()
+        _ollama("/api/generate", {"model": model, "prompt": "", "keep_alive": "30m"}, timeout=600)
+        log(f"{model} loaded in {time.time() - t0:.0f} s")
+        yield
+    finally:
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if out:
+            out.close()
 
 
 def classify(rows: list[dict], model: str, workers: int = WORKERS, articles: bool = False) -> list[dict]:
@@ -518,6 +594,32 @@ def load_landing_cli(env: str) -> bool:
     return bool(res.success)
 
 
+def finish(env: str, run_id: str, model: str, result: dict, articles: bool, dry_run: bool = False,
+           load=load_landing_cli) -> dict:
+    """A run's answers -> Parquet -> the lake -> LANDING, each step checked. `load(env)` runs
+    the LANDING load (the CLI's dbt, or a Dagster op's). Returns the report; fails in it."""
+    run_dir = RUNS / run_id
+    shutil.rmtree(run_dir / "tables", ignore_errors=True)
+    shutil.rmtree(run_dir / "parsed", ignore_errors=True)
+    staged = stage(result["rows"], run_dir, run_id)
+    report = {"run_id": run_id, "env": env, "model": model,
+              "prompt_version": ARTICLE_PROMPT_VERSION if articles else PROMPT_VERSION, **result["report"],
+              "fails": []}
+    if not dry_run and staged:
+        lake = Lake(env)
+        upload(lake, staged, run_dir, env)
+        report["fails"] = check_lake(lake, result, staged, run_dir, env)
+        if not report["fails"]:
+            report["dbt_success"] = load(env)
+            n, got = staged[TABLE][0], landing_count(run_id, env)
+            report["landing"] = {"parquet": n, "landing": got}
+            if got != n:
+                report["fails"].append(f"LANDING {TABLE}: {got} rows loaded, {n} expected")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.json").write_text(json.dumps(report, indent=1))
+    return report
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--eval", action="store_true", help="score the models on the gold set; nothing is uploaded")
@@ -545,28 +647,11 @@ def main() -> int:
 
     env = environment()
     model = (args.model or [MODEL])[0]
-    run_dir = RUNS / run_id
     log(f"run {run_id} env={env} zone='{zone(env)}' model={model} "
         f"prompt={ARTICLE_PROMPT_VERSION if args.articles else PROMPT_VERSION}")
-    result = run(env, run_id, model, args.limit, args.workers, args.articles)
-    shutil.rmtree(run_dir / "tables", ignore_errors=True)
-    shutil.rmtree(run_dir / "parsed", ignore_errors=True)
-    staged = stage(result["rows"], run_dir, run_id)
-    report = {"run_id": run_id, "env": env, "model": model,
-              "prompt_version": ARTICLE_PROMPT_VERSION if args.articles else PROMPT_VERSION, **result["report"],
-              "fails": []}
-    if not args.dry_run and staged:
-        lake = Lake(env)
-        upload(lake, staged, run_dir, env)
-        report["fails"] = check_lake(lake, result, staged, run_dir, env)
-        if not report["fails"]:
-            report["dbt_success"] = load_landing_cli(env)
-            n, got = staged[TABLE][0], landing_count(run_id, env)
-            report["landing"] = {"parquet": n, "landing": got}
-            if got != n:
-                report["fails"].append(f"LANDING {TABLE}: {got} rows loaded, {n} expected")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "report.json").write_text(json.dumps(report, indent=1))
+    with model_server(model):
+        result = run(env, run_id, model, args.limit, args.workers, args.articles)
+    report = finish(env, run_id, model, result, args.articles, args.dry_run)
     log("report:\n" + json.dumps(report, indent=1))
     return 1 if report["fails"] else 0
 
