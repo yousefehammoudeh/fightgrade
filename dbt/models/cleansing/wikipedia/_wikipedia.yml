@@ -1,0 +1,29 @@
+version: 2
+
+# English Wikipedia (pipeline/wikipedia_events.py): the bout changes each UFC
+# event article's Background section lists. CC BY-SA 4.0.
+models:
+  - name: cln_wikipedia_bout_changes
+    description: >
+      One row per Background sentence that describes a bout change, from the
+      newest run that read the article: older parses and older revisions are
+      dropped, and so are rows from an article several events redirect to (a
+      "2012 in UFC" section), whose event is unknown. bout_change_id is
+      requested_title:paragraph:sentence_index.
+      first_cited_on is the earliest day a citation gives, when the change was
+      first reported. A claim, not a fact: whether a disruption happened is
+      settled against the fight data downstream. revid and source_url attribute
+      every row to its revision.
+    columns:
+      - name: bout_change_id
+        data_tests: [unique, not_null]
+      - name: requested_title
+        data_tests: [not_null]
+      - name: revid
+        data_tests: [not_null]
+      - name: change_type
+        data_tests:
+          - accepted_values:
+              arguments: {values: [withdrawal, replacement, cancellation, moved, weight_miss]}
+      - name: run_id
+        data_tests: [not_null]

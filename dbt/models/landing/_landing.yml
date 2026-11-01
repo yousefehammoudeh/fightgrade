@@ -106,3 +106,10 @@ models:
   - name: lnd_news_events
     description: One row per (headline, model, prompt version) classified by the local model (pipeline/news_classify.py) - its answer as given (raw), parsed into event_type, status, fighters, replaced_fighter, opponent, event, reason, plus not_mma, the not-MMA filter's verdict. _raw_html_key is null.
     columns: *landing_columns
+
+  # English Wikipedia (pipeline/wikipedia_events.py): the Background section of every
+  # UFC event article. _raw_html_key is the archived API response in raw-json/wikipedia/.
+  # CC BY-SA 4.0: revid and source_url attribute every row to its revision.
+  - name: lnd_wikipedia_bout_changes
+    description: One row per Background sentence that describes a bout change (withdrawal, replacement, cancellation, bout moved, weight miss) - the pairing before it, withdrawn_fighter, replacement_fighter, reason as written, and citations [{url, title, date, date_iso, website}] whose date is when the change was reported. refers_to_event is set when the sentence is about an earlier booking at another event.
+    columns: *landing_columns

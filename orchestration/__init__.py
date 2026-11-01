@@ -53,6 +53,12 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    After the PROD build that follows each news_crawl (it puts
                    the new headlines in stg_news_headlines), by the
                    classify_after_news_crawl sensor; a few minutes a day.
+  wikipedia_crawl  English Wikipedia's UFC event articles -> lake -> LANDING
+                   (orchestration/wikipedia.py): the bout changes their
+                   Background sections list, dated by their citations. Weekly,
+                   Monday 07:00, once the weekend's card has been written up:
+                   the list and every event within 60 days of today, ~20
+                   requests. A backfill=true run reads every event not archived yet.
 
 A crawl that stops before archiving anything fails, and the crawl_retry sensor
 launches it again with the same config: Serverless gives each run one of 3
@@ -94,9 +100,10 @@ from .judge_lens import judge_lens_train
 from .mmadecisions import mmadecisions_crawl
 from .news import news_classify, news_crawl
 from .ufcstats import ufcstats_crawl
+from .wikipedia import wikipedia_crawl
 
 TIMEZONE = "America/Toronto"
-DAILY_0200, DAILY_0500, SUNDAY_0600 = "0 2 * * *", "0 5 * * *", "0 6 * * 0"
+DAILY_0200, DAILY_0500, SUNDAY_0600, MONDAY_0700 = "0 2 * * *", "0 5 * * *", "0 6 * * 0", "0 7 * * 1"
 ON_PROD = IN_DAGSTER_PLUS and not IS_BRANCH_DEPLOYMENT
 SCHEDULE_STATUS = DefaultScheduleStatus.RUNNING if ON_PROD else DefaultScheduleStatus.STOPPED
 SENSOR_STATUS = DefaultSensorStatus.RUNNING if ON_PROD else DefaultSensorStatus.STOPPED
@@ -170,7 +177,7 @@ def judge_lens_after_build(context: RunStatusSensorContext) -> RunRequest:
     return RunRequest(run_key=context.dagster_run.run_id)
 
 
-CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl, news_crawl, news_classify]
+CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl, news_crawl, news_classify, wikipedia_crawl]
 IP_RETRY_TAG = "fightgrade/ip_retry"
 # With one refused IP in three, four misses in a row is about one night in 80.
 MAX_IP_RETRIES = 3
@@ -261,6 +268,12 @@ defs = Definitions(
         ScheduleDefinition(
             job=news_crawl,
             cron_schedule=DAILY_0500,
+            execution_timezone=TIMEZONE,
+            default_status=SCHEDULE_STATUS,
+        ),
+        ScheduleDefinition(
+            job=wikipedia_crawl,
+            cron_schedule=MONDAY_0700,
             execution_timezone=TIMEZONE,
             default_status=SCHEDULE_STATUS,
         ),
