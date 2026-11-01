@@ -3,6 +3,7 @@
     .venv/bin/python -m pipeline.news_articles --gold                # the gold set's candidates
     .venv/bin/python -m pipeline.news_articles --flagged             # every headline the classifier flags
     .venv/bin/python -m pipeline.news_articles --ids FILE --dry-run
+    .venv/bin/python -m pipeline.news_articles --replay              # re-parse the archive, no requests
 
 A headline cannot always say whose retirement it is, or whether it is a fact or
 talk ("Stipe Miocic issues first statement Jon Jones retirement"); the article
@@ -19,9 +20,14 @@ description, datePublished (the exact time, which step 6 needs for days'
 notice) and articleBody. One row per page goes to LANDING lnd_news_articles.
 The two sites are read at once, one thread each, so a backfill of ~6k pages
 takes ~5 hours.
+
+--replay re-parses the latest archived copy of every page in this environment's
+zone, straight from the bucket, and loads it again: a parser change is replayed,
+and PROD is filled from a copy of DEV's archive without asking the sites twice.
 """
 import argparse, gzip, html, json, re, shutil, sys, threading, time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
@@ -48,6 +54,12 @@ def page_name(news_url_id: str) -> str:
     return news_url_id.replace(":", "_")
 
 
+def page_id(name: str) -> str:
+    """The reverse of page_name. Every archived name is site_era_digits (sites and eras have no '_')."""
+    site, era, article_id = name.split("_", 2)
+    return f"{site}:{era}:{article_id}"
+
+
 def clean(text: str | None) -> str | None:
     if text is None:
         return None
@@ -66,7 +78,9 @@ def parse_article(page: str) -> dict:
             if isinstance(x, dict) and "articleBody" in x:
                 author = x.get("author")
                 author = author[0] if isinstance(author, list) and author else author
-                return {"headline": clean(x.get("headline")), "description": clean(x.get("description")),
+                page_url = x.get("url") or x.get("mainEntityOfPage")
+                return {"page_url": page_url if isinstance(page_url, str) else None,
+                        "headline": clean(x.get("headline")), "description": clean(x.get("description")),
                         "date_published": x.get("datePublished"), "date_modified": x.get("dateModified"),
                         "author": clean(author.get("name")) if isinstance(author, dict) else None,
                         "section": clean(x.get("articleSection") if isinstance(x.get("articleSection"), str) else None),
@@ -123,7 +137,8 @@ def page_rows(pages: list[tuple[Path, str, dict]]) -> tuple[list[dict], list[dic
         except (OSError, ValueError) as ex:
             anomalies.append({"id": r["news_url_id"], "code": "parse_failed", "detail": f"{type(ex).__name__}: {ex}"})
             continue
-        rows.append({"news_url_id": r["news_url_id"], "site": r["site"], "url": r["url"], **a,
+        page_url = a.pop("page_url")
+        rows.append({"news_url_id": r["news_url_id"], "site": r["site"], "url": r.get("url") or page_url, **a,
                      "body_chars": len(a["body"] or ""), "_raw_html_key": key,
                      "fetch_date": key.split("/fetch_date=", 1)[1].split("/", 1)[0]})
     return rows, anomalies
@@ -151,6 +166,35 @@ def run(env: str, run_id: str, lake: Lake | None, todo: list[dict], interval: fl
     return {"fetch_date": fetch_date, "run_dir": str(run_dir), "pages": [(p[0], p[1]) for p in pages],
             "rows": {TABLE: rows}, "anomalies": [a for v in out.values() for a in v["anomalies"]] + parse_failures,
             "report": {**report, "rows": len(rows)}, "stopped": stopped}
+
+
+def replay(lake: Lake, env: str, run_id: str) -> dict:
+    """Re-parse the latest archived copy of every page in this environment's zone. No requests
+    to the sites; the URL comes from the page's own JSON-LD."""
+    latest: dict[str, str] = {}
+    prefix = f"{zone(env)}raw-html/source=news/entity=article/"
+    for blob in lake.bucket.list_blobs(prefix=prefix):
+        if blob.name.endswith(".html.gz"):
+            name = blob.name.rsplit("/", 1)[1][: -len(".html.gz")]
+            if blob.name > latest.get(name, ""):                  # fetch_date sorts as text
+                latest[name] = blob.name
+    run_dir = RUNS / run_id
+
+    def fetch(item: tuple[str, str]) -> tuple[Path, str, dict]:
+        name, key = item
+        nid = page_id(name)
+        local = run_dir / "raw" / nid.split(":", 1)[0] / f"{name}.html.gz"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        lake.bucket.blob(key).download_to_filename(str(local))
+        return local, key, {"news_url_id": nid, "site": nid.split(":", 1)[0]}
+
+    with ThreadPoolExecutor(16) as pool:
+        pages = list(pool.map(fetch, sorted(latest.items())))
+    rows, parse_failures = page_rows(pages)
+    log(f"replay: {len(pages):,} pages in {prefix} -> {len(rows):,} rows")
+    return {"fetch_date": date.today().isoformat(), "run_dir": str(run_dir), "pages": [(p[0], p[1]) for p in pages],
+            "rows": {TABLE: rows}, "anomalies": parse_failures,
+            "report": {"pages_replayed": len(pages), "rows": len(rows)}, "stopped": None, "replay": True}
 
 
 GOLD = """
@@ -182,7 +226,7 @@ def select(env: str, gold: bool, model: str | None = None, prompt_version: str |
 
 
 def upload(lake: Lake, result: dict, staged: dict, run_dir: Path, env: str) -> tuple[int, int]:
-    for local, key in result["pages"]:
+    for local, key in [] if result.get("replay") else result["pages"]:
         lake.upload_file(local, key, "application/gzip")
     files = [f for _, fs in staged.values() for f in fs]
     for f in files:
@@ -234,6 +278,7 @@ def main() -> int:
     which.add_argument("--gold", action="store_true", help="the gold set's candidates")
     which.add_argument("--flagged", action="store_true", help=f"headlines {MODEL} {PROMPT_VERSION} flags as {', '.join(FLAG_TYPES)}")
     which.add_argument("--ids", type=Path, help="a JSON list of {news_url_id, site, url}")
+    which.add_argument("--replay", action="store_true", help="re-parse this zone's archived pages; no requests")
     ap.add_argument("--interval", type=float, default=MIN_INTERVAL)
     ap.add_argument("--max-requests", type=int, default=BACKFILL_BUDGET, help="per site")
     ap.add_argument("--max-minutes", type=float, default=MAX_FETCH_MINUTES)
@@ -246,13 +291,17 @@ def main() -> int:
     env, run_id = environment(), new_run_id()
     run_dir = RUNS / run_id
     log(f"run {run_id} env={env} zone='{zone(env)}'")
-    lake = None if args.dry_run else Lake(env)
-    todo = json.loads(args.ids.read_text()) if args.ids else select(env, args.gold, MODEL, PROMPT_VERSION)
-    if lake:
-        have = archived(lake, env)
-        todo = [r for r in todo if page_name(r["news_url_id"]) not in have]
-    todo = todo[: args.limit] if args.limit else todo
-    result = run(env, run_id, lake, todo, args.interval, args.max_requests, args.max_minutes)
+    lake = None if args.dry_run and not args.replay else Lake(env)
+    if args.replay:
+        result = replay(lake, env, run_id)
+        lake = None if args.dry_run else lake
+    else:
+        todo = json.loads(args.ids.read_text()) if args.ids else select(env, args.gold, MODEL, PROMPT_VERSION)
+        if lake:
+            have = archived(lake, env)
+            todo = [r for r in todo if page_name(r["news_url_id"]) not in have]
+        todo = todo[: args.limit] if args.limit else todo
+        result = run(env, run_id, lake, todo, args.interval, args.max_requests, args.max_minutes)
     shutil.rmtree(run_dir / "tables", ignore_errors=True)
     shutil.rmtree(run_dir / "parsed", ignore_errors=True)
     staged = stage(result["rows"], run_dir, run_id)

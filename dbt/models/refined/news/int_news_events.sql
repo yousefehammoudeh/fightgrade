@@ -11,7 +11,7 @@
 -- data downstream (README, step 6), and a retirement holds only until the next bout.
 {% set model = var('news_model', 'qwen3:4b') %}
 {% set slug_prompt = var('news_slug_prompt', 'v2') %}
-{% set article_prompt = var('news_article_prompt', 'a1') %}
+{% set article_prompt = var('news_article_prompt', 'a2') %}
 with answers as (
     select
         payload:news_url_id::varchar                as news_url_id,
