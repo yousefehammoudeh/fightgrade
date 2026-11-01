@@ -32,7 +32,7 @@ from .tapology import Budget, Stop, parsed_key, roundtrip_mismatches, snowflake_
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "_crawlruns" / "news_articles"
 TABLE = "news_articles"
-DBT_SELECT = "path:models/landing/news"
+DBT_SELECT = "lnd_news_articles"     # its own table only: the slug runs load lnd_news_events beside it
 FLAG_TYPES = ("retirement", "return", "withdrawal", "replacement")
 BACKFILL_BUDGET = 5000      # per site
 MAX_FETCH_MINUTES = 8 * 60
@@ -216,9 +216,16 @@ def landing_count(run_id: str, env: str) -> int:
     return cur.fetchone()[0]
 
 
+def load_landing_cli(env: str) -> bool:
+    from dbt.cli.main import dbtRunner
+
+    res = dbtRunner().invoke(["build", "--select", DBT_SELECT, "--target", env,
+                              "--project-dir", str(ROOT / "dbt"), "--profiles-dir", str(Path("~/.dbt").expanduser())])
+    return bool(res.success)
+
+
 def main() -> int:
     from .news_classify import MODEL, PROMPT_VERSION
-    from .news_sitemaps import load_landing_cli
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     which = ap.add_mutually_exclusive_group(required=True)
