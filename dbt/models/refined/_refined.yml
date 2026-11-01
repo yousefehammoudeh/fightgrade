@@ -115,3 +115,32 @@ models:
         data_tests: [not_null]
       - name: headline
         data_tests: [not_null]
+
+  - name: int_news_events
+    description: >
+      Fighter events the news reports, one row per headline: event_type (withdrawal,
+      replacement, weight_miss, retirement, return, suspension, release, signing,
+      fought_injured, booking), status (confirmed, speculative, denied), the fighters it
+      happens to, replaced_fighter, opponent, event, reason. source says whether the
+      article was read ('article') or only the headline ('slug'); published_at is the
+      article's exact publication time where it was. Scored on the gold set
+      (seed news_event_labels): see experiments/news/README.md. A claim, not a fact -
+      the fight data settles what happened.
+    columns:
+      - name: news_url_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('stg_news_headlines'), field: news_url_id}}
+      - name: event_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [withdrawal, replacement, weight_miss, retirement, return, suspension, release,
+                         signing, fought_injured, booking]
+      - name: status
+        data_tests:
+          - accepted_values: {arguments: {values: [confirmed, speculative, denied]}}
+      - name: source
+        data_tests:
+          - accepted_values: {arguments: {values: [article, slug]}}
