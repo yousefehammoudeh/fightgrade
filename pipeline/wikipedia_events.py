@@ -361,6 +361,7 @@ STOP = {
     "heavyweight", "welterweight", "middleweight", "lightweight", "featherweight", "bantamweight", "flyweight",
     "strawweight", "atomweight", "light", "women's", "men's", "featherweight,", "co-main", "main", "dana", "white's",
     "abu", "dhabi", "las", "vegas", "he", "she", "they", "it", "both", "this", "that", "while", "dwcs",
+    "espn", "espn2", "espn+", "abc", "fox", "fx", "fs1", "fuel", "tv", "pass", "paramount+", "pay-per-view", "ppv",
 }
 PRONOUNS = {"he", "she", "they", "him", "her", "his", "hers", "it"}
 
