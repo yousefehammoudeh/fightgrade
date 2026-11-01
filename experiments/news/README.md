@@ -82,6 +82,11 @@ published, like `xref_decision_ufcstats_fight_match_rate`.
 **6. Facts (1 day).**
 - `fct_bout_disruption`: bout, withdrawn fighter, replacement, reason (news, else Tapology),
   first report date, **days_notice** = event date − first report.
+- **The fight data decides, the news dates and explains.** A withdrawal or replacement enters
+  `fct_bout_disruption` only when it matches a Tapology cancelled bout (or the bout that
+  replaced it); a news claim with no such bout stays a claim (Chimaev vs Prochazka, 2026: talked
+  about, never booked, not on Tapology). Match on names, not slugs: a Tapology slug can carry an
+  old name (Chimaev is `188143-khamzat-girikhanov`).
 - Fight-week precision: for disruptions reported ≤ 7 days out, fetch the article page once and
   keep only `published_time` (a few thousand pages over 20 years).
 - `fct_fighter_status_event`: retirement / return / suspension / release, each a dated claim with
