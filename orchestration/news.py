@@ -33,8 +33,10 @@ The model runs in the run's own container: Ollama is in the image (CPU only), th
 weights (~2.5 GB) are pulled from Ollama's registry at the start and checked
 against news_classify.MODEL_DIGEST. Pulling them per run, not baking them into
 the image, keeps every other job's start fast: Fargate caches no image layers.
-A day brings ~6 candidates (p95 11) and ~2 flagged articles (p95 5): ~10 s a
-headline and ~20 s an article on 4 vCPUs, a few minutes in all. The articles are
+A day brings ~6 candidates (p95 11) and ~2 flagged articles (p95 5). Measured on
+Serverless (2026-11-01): the pull ~15 s, then ~25 s a headline and ~50 s an
+article, and ~2 min for each step's first request (the long fixed prompt);
+~10-15 min a day in all. The articles are
 read under the same rules as the sitemaps (honest user agent, >= 6 s a site, the
 site's lock). A site that refuses is left for the next day: a page is fetched
 until it is archived. The PROD build after it (build_after_crawl) rebuilds

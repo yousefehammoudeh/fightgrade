@@ -20,10 +20,11 @@ of the chosen model and version.
 The daily run is the Dagster job news_classify (orchestration/news.py). The image
 carries Ollama, CPU only; model_server() starts it and pulls the model, checked
 against MODEL_DIGEST, so a day's answers come from the very weights the backfill
-used. On CPU (a Serverless run's 4 vCPUs) a headline takes ~10 s and an article
-~20 s; the same weights on a laptop's GPU agree on the event type and status for
-69 of 70 headlines and articles, and on every field for 65 (floating point
-differs between the two).
+used. On a Serverless run's 4 vCPUs a headline takes ~25 s and an article ~50 s.
+CPU and GPU arithmetic differ, so answers can too: Serverless agreed with the
+laptop-GPU backfill on the event type and status for 15 of 15 headlines and
+articles (14 identical in every field), and a 4-CPU container on a laptop for
+69 of 70.
 """
 import argparse, csv, json, os, re, shutil, subprocess, sys, time, urllib.request
 from collections import Counter, defaultdict
