@@ -374,6 +374,8 @@ def clean_name(words: list[str]) -> str | None:
     while words and words[0] in PARTICLES:              # 'da Silva' -> 'Silva', but 'Van' is a name
         words = words[1:]
     name = " ".join(words).strip(",;:()\"'“”")
+    if name.endswith(".") and not re.search(r"(?:\b[A-Z]|Jr|Sr|St)\.$", name):
+        name = name[:-1]
     name = re.sub(r"(?:'s|’s)$", "", name).strip()
     return name or None
 
@@ -463,7 +465,7 @@ def pairing(s: str) -> tuple[str, str] | None:
 
 
 WITHDREW = re.compile(
-    r"\b(?:withdrew|withdrawn|had to withdraw|was forced to withdraw|was forced (?:out|off)|were forced out|"
+    r"\b(?:withdrew|withrew|withdrawn|withdrawal due|had to withdraw|was forced to withdraw|was forced (?:out|off)|were forced out|"
     r"pulled out|was pulled|were pulled|dropped out|bowed out|was removed|were removed|was scratched|"
     r"was sidelined|was not (?:medically )?cleared|was deemed (?:unfit|medically unfit)|was unable to (?:compete|"
     r"fight|make|obtain|travel|secure)|could not (?:compete|make|obtain|travel)|stepped away|fell ill|"
@@ -525,15 +527,19 @@ def reason_category(reason: str | None) -> str | None:
     return "other"
 
 
+ADVERBS = re.compile(r"(?:\s+(?:once|again|also|then|later|subsequently|ultimately|eventually|reportedly|"
+                     r"officially|unfortunately|himself|herself|too|initially|had|has|was|would|ended up|"
+                     r"in turn|in the end|as well))+\s*$", re.I)
+
+
 def withdrawn_of(s: str) -> str | None:
     """Who left the bout: the subject of 'withdrew' / 'was replaced', or 'due to X's ...'."""
     m = re.search(r"\bdue to ([A-Z][\w\-.' ]*?)(?:'s|’s)\b", s)
     if m and m.group(1).split()[-1].lower() not in PRONOUNS:
         return m.group(1).strip()
     for pat in (WITHDREW, re.compile(r"\b(?:was|were) replaced\b", re.I)):
-        m = pat.search(s)
-        if m:
-            who = last_name_phrase(re.sub(r"[\[\]]", "", s[:m.start()]))
+        for m in pat.finditer(s):
+            who = last_name_phrase(ADVERBS.sub("", re.sub(r"[\[\]]", "", s[:m.start()])))
             if who and who.lower() not in PRONOUNS:
                 return who
     return None
@@ -543,8 +549,9 @@ def replacement_of(s: str) -> tuple[str | None, str | None]:
     """(replacement, who they replaced if this sentence says so)."""
     m = re.search(r"\breplaced by\s+(?P<rest>.+)$", s, re.I)
     if m:
-        seg = re.split(r",| who | in an? | at | for | on | after | as | instead| \(|;| and (?:was|were|the)\b",
-                      m.group("rest"))[0]
+        rest = re.sub(r"\s*\([^)]*\)", "", m.group("rest"))
+        seg = re.split(r",| who | in an? | at | for | on | after | as | instead|;| and (?:was|were)\b|"
+                       r" and the (?:bout|fight|pairing|matchup|rematch)\b", rest)[0]
         return last_name_phrase(seg.rstrip(". ")), None
     m = STEPPED_IN.match(s)
     if m:
@@ -611,7 +618,7 @@ def background_changes(wikitext: str, title: str) -> tuple[list[dict], dict]:
     text = REF.sub(ref, COMMENT.sub("", bg))
     rows, counts = [], Counter(sentences_seen=0)
     for p_i, para in enumerate(paragraphs(text)):
-        pair, pair_sentence, pair_cites, pair_links = None, None, [], {}
+        pair, pair_sentence, pair_cites, pair_links, last_out = None, None, [], {}, None
         sents = sentences(para)
         own = [[int(i) for i in PLACEHOLDER.findall(x)] for x in sents]
         for s_i, raw in enumerate(sents):
@@ -634,6 +641,9 @@ def background_changes(wikitext: str, title: str) -> tuple[list[dict], dict]:
             all_links = {**pair_links, **links}
             a, b = pair or (None, None)
             withdrawn, replacement = ch.pop("withdrawn_as_written"), ch.pop("replacement_as_written")
+            if withdrawn is None and ch["change_type"] in ("replacement", "withdrawal") and last_out \
+                    and re.match(r"^(?:\w+,\s*)?(?:he|she|they|the (?:latter|former))\b", s, re.I):
+                withdrawn = last_out
             full = next((f for f in (a, b) if same_fighter(withdrawn, f)), None)
             other = (b if full == a else a) if full else None
             refers = None
@@ -655,6 +665,8 @@ def background_changes(wikitext: str, title: str) -> tuple[list[dict], dict]:
                 "pairing_citations": pair_cites if pair_sentence != s else [],
             })
             counts[f"changes_{ch['change_type']}"] += 1
+            if ch["change_type"] != "weight_miss" and (full or withdrawn):
+                last_out = full or withdrawn
             if full and replacement and ch["change_type"] == "replacement" and refers is None:
                 pair = (replacement, other) if full == a else (other, replacement)
                 pair_links = {**all_links}
