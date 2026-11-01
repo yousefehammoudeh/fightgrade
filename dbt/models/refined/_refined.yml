@@ -95,3 +95,23 @@ models:
       - name: cv_fold
         data_tests:
           - accepted_values: {arguments: {values: [0, 1, 2, 3, 4]}}
+
+  - name: stg_news_headlines
+    description: >
+      One row per news article on MMA Fighting and MMA Mania: the slug as words
+      (headline), the day it was published (published_date; date_source 'url' is
+      the day in a Vox URL, 'lastmod' a WordPress URL's last edit), and a loose
+      keyword pass. is_candidate marks headlines the classifier reads, and
+      candidate_types the keyword families that fired (retirement, withdrawal,
+      replacement, weight_miss, suspension, release). It is tuned for recall,
+      which the gold set measures.
+    columns:
+      - name: news_url_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('cln_news_urls'), field: news_url_id}}
+      - name: published_date
+        data_tests: [not_null]
+      - name: headline
+        data_tests: [not_null]
