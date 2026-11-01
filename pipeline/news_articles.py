@@ -209,6 +209,7 @@ join (select payload:news_url_id::varchar as news_url_id, payload:event_type::va
       where payload:model::varchar = %s and payload:prompt_version::varchar = %s and not payload:not_mma::boolean
       qualify row_number() over (partition by news_url_id order by _loaded_at desc) = 1) e using (news_url_id)
 where e.event_type in ({TYPES})
+order by h.published_date desc
 """
 
 
@@ -270,6 +271,41 @@ def load_landing_cli(env: str) -> bool:
     return bool(res.success)
 
 
+def finish(env: str, run_id: str, result: dict, lake: Lake | None, load=load_landing_cli) -> dict:
+    """A run's pages and rows -> the lake -> LANDING, each step checked. `load(env)` runs the
+    LANDING load (the CLI's dbt, or a Dagster op's). Without a lake (a dry run) nothing is
+    uploaded. Returns the report; fails in it."""
+    run_dir = RUNS / run_id
+    shutil.rmtree(run_dir / "tables", ignore_errors=True)
+    shutil.rmtree(run_dir / "parsed", ignore_errors=True)
+    staged = stage(result["rows"], run_dir, run_id)
+    if lake:
+        n_pages, n_files = upload(lake, result, staged, run_dir, env)
+        log(f"uploaded {n_pages} pages and {n_files} Parquet files")
+    checks = verify(result, staged, run_dir, env, lake)
+    report = {"run_id": run_id, "env": env, **result["report"], **checks}
+    if lake and not checks["fails"] and staged:
+        report["dbt_success"] = load(env)
+        n, got = staged[TABLE][0], landing_count(run_id, env)
+        report["landing"] = {"parquet": n, "landing": got}
+        if got != n:
+            report["fails"].append(f"LANDING {TABLE}: {got} rows loaded, {n} expected")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.json").write_text(json.dumps(report, indent=1))
+    return report
+
+
+def todo_flagged(env: str, lake: Lake | None, limit: int = 0) -> list[dict]:
+    """The flagged headlines whose page is not archived yet, newest first."""
+    from .news_classify import MODEL, PROMPT_VERSION
+
+    todo = select(env, False, MODEL, PROMPT_VERSION)
+    if lake:
+        have = archived(lake, env)
+        todo = [r for r in todo if page_name(r["news_url_id"]) not in have]
+    return todo[:limit] if limit else todo
+
+
 def main() -> int:
     from .news_classify import MODEL, PROMPT_VERSION
 
@@ -289,7 +325,6 @@ def main() -> int:
         ap.error(f"--interval below {MIN_INTERVAL} s breaks the news crawl's rule")
 
     env, run_id = environment(), new_run_id()
-    run_dir = RUNS / run_id
     log(f"run {run_id} env={env} zone='{zone(env)}'")
     lake = None if args.dry_run and not args.replay else Lake(env)
     if args.replay:
@@ -302,21 +337,7 @@ def main() -> int:
             todo = [r for r in todo if page_name(r["news_url_id"]) not in have]
         todo = todo[: args.limit] if args.limit else todo
         result = run(env, run_id, lake, todo, args.interval, args.max_requests, args.max_minutes)
-    shutil.rmtree(run_dir / "tables", ignore_errors=True)
-    shutil.rmtree(run_dir / "parsed", ignore_errors=True)
-    staged = stage(result["rows"], run_dir, run_id)
-    if lake:
-        n_pages, n_files = upload(lake, result, staged, run_dir, env)
-        log(f"uploaded {n_pages} pages and {n_files} Parquet files")
-    checks = verify(result, staged, run_dir, env, lake)
-    report = {"run_id": run_id, "env": env, **result["report"], **checks}
-    if lake and not checks["fails"] and staged:
-        report["dbt_success"] = load_landing_cli(env)
-        n, got = staged[TABLE][0], landing_count(run_id, env)
-        report["landing"] = {"parquet": n, "landing": got}
-        if got != n:
-            report["fails"].append(f"LANDING {TABLE}: {got} rows loaded, {n} expected")
-    (run_dir / "report.json").write_text(json.dumps(report, indent=1))
+    report = finish(env, run_id, result, lake)
     log("report:\n" + json.dumps({**report, "warns": report["warns"][:20]}, indent=1))
     return 1 if report["fails"] else 0
 
