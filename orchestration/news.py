@@ -1,4 +1,5 @@
 """news_crawl: MMA Fighting's and MMA Mania's monthly sitemaps -> the lake -> LANDING.
+news_classify: the new candidate headlines -> events, after each news_crawl's build.
 
     news_fetch -> news_stage_parquet -> news_upload_to_lake -> news_check_lake
         -> news_load_landing -> news_check_landing
@@ -21,11 +22,32 @@ PROD's history is filled that way from a copy of DEV's archive:
 A run whose every site stops before archiving anything (a refusal, a limit,
 another run holding the lock) fails, and the crawl_retry sensor launches it
 again, usually from another egress IP.
+
+news_classify (pipeline/news_classify.py, pipeline/news_articles.py) runs after
+the PROD build that follows each news_crawl, by the classify_after_news_crawl
+sensor, so the day's headlines are in stg_news_headlines:
+
+    news_classify_headlines -> news_read_articles -> news_classify_articles
+
+The model runs in the run's own container: Ollama is in the image (CPU only), the
+weights (~2.5 GB) are pulled from Ollama's registry at the start and checked
+against news_classify.MODEL_DIGEST. Pulling them per run, not baking them into
+the image, keeps every other job's start fast: Fargate caches no image layers.
+A day brings ~6 candidates (p95 11) and ~2 flagged articles (p95 5). Measured on
+Serverless (2026-11-01): the pull ~15 s, then ~25 s a headline and ~50 s an
+article, and ~2 min for each step's first request (the long fixed prompt);
+~10-15 min a day in all. The articles are
+read under the same rules as the sitemaps (honest user agent, >= 6 s a site, the
+site's lock). A site that refuses is left for the next day: a page is fetched
+until it is archived. The PROD build after it (build_after_crawl) rebuilds
+int_news_events.
 """
 from pathlib import Path
 
 from dagster import Config, Failure, OpExecutionContext, in_process_executor, job, op
 
+import pipeline.news_articles as articles
+import pipeline.news_classify as classifier
 import pipeline.news_sitemaps as news
 from pipeline.lake import Lake, environment, new_run_id, zone
 
@@ -123,3 +145,72 @@ def news_check_landing(context: OpExecutionContext, bundle: dict) -> None:
 @job(executor_def=in_process_executor, tags={"fightgrade/checkout": "main"})
 def news_crawl():
     news_check_landing(news_load_landing(news_check_lake(news_upload_to_lake(news_stage_parquet(news_fetch())))))
+
+
+class NewsClassifyConfig(Config):
+    limit: int = 300                        # candidate headlines per run, newest first (~10 s each)
+    article_limit: int = 100                # flagged articles to read per run
+    workers: int = 1                        # CPU Ollama serves one request at a time
+    interval: float = news.MIN_INTERVAL     # seconds between article requests on a site; 6 is the floor
+
+
+def load_with(context: OpExecutionContext, select: str):
+    """A finish() load: this code location's dbt for the target's LANDING table."""
+    def load(env: str) -> bool:
+        run_dbt(context, dbt_project_for(env), "build", "--select", select, "--target", env)
+        return True
+    return load
+
+
+def classify_step(context: OpExecutionContext, config: NewsClassifyConfig, of_articles: bool) -> dict:
+    env, run_id = environment(), new_run_id()
+    model = classifier.MODEL
+    context.log.info(f"run {run_id}, env {env}, {model} "
+                     f"{classifier.ARTICLE_PROMPT_VERSION if of_articles else classifier.PROMPT_VERSION}")
+    with crawler_log_to(context, classifier):
+        with classifier.model_server(model, classifier.RUNS / f"ollama-{run_id}.log"):
+            result = classifier.run(env, run_id, model, config.article_limit if of_articles else config.limit,
+                                    config.workers, of_articles)
+        report = classifier.finish(env, run_id, model, result, of_articles,
+                                   load=load_with(context, classifier.DBT_SELECT))
+    context.add_output_metadata({k: v for k, v in report.items() if isinstance(v, (int, str))})
+    if report["fails"]:
+        raise Failure(f"{len(report['fails'])} checks failed", metadata={"fails": "\n".join(report["fails"][:50])})
+    return report
+
+
+@op
+def news_classify_headlines(context: OpExecutionContext, config: NewsClassifyConfig) -> dict:
+    """Every candidate headline with no answer yet from the model's slug prompt."""
+    return classify_step(context, config, of_articles=False)
+
+
+@op
+def news_read_articles(context: OpExecutionContext, config: NewsClassifyConfig, headlines: dict) -> dict:
+    """The pages behind the flagged headlines not archived yet -> the lake -> LANDING."""
+    if config.interval < news.MIN_INTERVAL:
+        raise Failure(f"interval below {news.MIN_INTERVAL} s breaks the news crawl's rule")
+    env, run_id = environment(), new_run_id()
+    lake = Lake(env)
+    with crawler_log_to(context, articles):
+        todo = articles.todo_flagged(env, lake, config.article_limit)
+        result = articles.run(env, run_id, lake, todo, config.interval, config.article_limit,
+                              articles.MAX_FETCH_MINUTES)
+        report = articles.finish(env, run_id, result, lake, load=load_with(context, articles.DBT_SELECT))
+    for w in report["warns"][:200]:
+        context.log.warning(w)
+    context.add_output_metadata({k: v for k, v in report.items() if isinstance(v, (int, str))})
+    if report["fails"]:
+        raise Failure(f"{len(report['fails'])} checks failed", metadata={"fails": "\n".join(report["fails"][:50])})
+    return report
+
+
+@op
+def news_classify_articles(context: OpExecutionContext, config: NewsClassifyConfig, read: dict) -> None:
+    """Every article read with no answer yet from the model's article prompt."""
+    classify_step(context, config, of_articles=True)
+
+
+@job(executor_def=in_process_executor, tags={"fightgrade/checkout": "main"})
+def news_classify():
+    news_classify_articles(news_read_articles(news_classify_headlines()))

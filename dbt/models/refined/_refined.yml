@@ -95,3 +95,52 @@ models:
       - name: cv_fold
         data_tests:
           - accepted_values: {arguments: {values: [0, 1, 2, 3, 4]}}
+
+  - name: stg_news_headlines
+    description: >
+      One row per news article on MMA Fighting and MMA Mania: the slug as words
+      (headline), the day it was published (published_date; date_source 'url' is
+      the day in a Vox URL, 'lastmod' a WordPress URL's last edit), and a loose
+      keyword pass. is_candidate marks headlines the classifier reads, and
+      candidate_types the keyword families that fired (retirement, withdrawal,
+      replacement, weight_miss, suspension, release). It is tuned for recall,
+      which the gold set measures.
+    columns:
+      - name: news_url_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('cln_news_urls'), field: news_url_id}}
+      - name: published_date
+        data_tests: [not_null]
+      - name: headline
+        data_tests: [not_null]
+
+  - name: int_news_events
+    description: >
+      Fighter events the news reports, one row per headline: event_type (withdrawal,
+      replacement, weight_miss, retirement, return, suspension, release, signing,
+      fought_injured, booking), status (confirmed, speculative, denied), the fighters it
+      happens to, replaced_fighter, opponent, event, reason. source says whether the
+      article was read ('article') or only the headline ('slug'); published_at is the
+      article's exact publication time where it was. Scored on the gold set
+      (seed news_event_labels): see experiments/news/README.md. A claim, not a fact -
+      the fight data settles what happened.
+    columns:
+      - name: news_url_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('stg_news_headlines'), field: news_url_id}}
+      - name: event_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [withdrawal, replacement, weight_miss, retirement, return, suspension, release,
+                         signing, fought_injured, booking]
+      - name: status
+        data_tests:
+          - accepted_values: {arguments: {values: [confirmed, speculative, denied]}}
+      - name: source
+        data_tests:
+          - accepted_values: {arguments: {values: [article, slug]}}

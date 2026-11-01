@@ -32,10 +32,12 @@
 ## Rules
 
 Honest user agent naming the project (`FightGrade-news/1.0 (private, non-commercial MMA research)`;
-no contact, by choice); ≥ 6 s between requests per site; one lock per
-site, as `pipeline/tapology.py` does; raw responses archived before parsing. Sitemaps only, plus
-article pages solely for step 6's fight-week timestamps, keeping nothing from a page but
-`published_time`. No browser, no user-agent spoofing. Any new site needs its own permission.
+no contact, by choice); ≥ 6 s between requests per site; one lock per site, as `pipeline/tapology.py`
+does, shared by the sitemap and article crawls; raw responses archived before parsing. Sitemaps,
+plus article pages where a headline cannot settle the question: the owners agreed to article text
+"when necessary" (the user, 2026-10-31), so only the pages behind headlines the classifier flags
+as a retirement, return, withdrawal or replacement are read (`pipeline/news_articles.py`). No
+browser, no user-agent spoofing. Any new site needs its own permission.
 
 ## Build plan
 
@@ -73,6 +75,17 @@ Cortex `AI_COMPLETE` with a JSON schema on a small model:
 - **Checked 2026-10-31: none.** The account (AWS_US_EAST_2) is a trial: `AI_COMPLETE` and
   `AI_CLASSIFY` answer "not available for trial accounts", and the legacy `SNOWFLAKE.CORTEX.*`
   functions are blocked for new accounts.
+- **Built 2026-11-01 instead:** a local model, qwen3:4b in Ollama (`pipeline/news_classify.py`),
+  in two stages. Every candidate slug is classified (prompt v2, plus a not-MMA filter); the ones
+  flagged as a retirement, return, withdrawal or replacement have their article read
+  (`pipeline/news_articles.py`) and classified again (prompt a2), and the article's answer wins.
+  The DEV backfill: 34,465 slugs, 10,441 article pages, 9,825 article answers, 19,623 events.
+  Gold set, both stages: retirement precision 0.93 on the random 400 (1.00 on the held-out
+  half); withdrawal ∪ replacement 0.96 (0.97). Replacement alone is 0.75 on all 600, so
+  Tapology decides which of the two a disruption is (step 6).
+- Hand list: with the step 6 rule (a retirement counts only after the fighter's last bout),
+  Khabib, Jones, GSP, Cormier and Nunes each land within a day of the true date. Every false
+  claim the model makes for them (3–8 each: injuries, plans, quotes) falls before a later bout.
 
 **5. Linking (1 day, after Elo step 2).** `xref_news_fighter` (names → `dim_fighter`, the same
 accent-, case- and nickname-tolerant matching as the bout matcher) and `xref_news_bout`
@@ -82,10 +95,17 @@ published, like `xref_decision_ufcstats_fight_match_rate`.
 **6. Facts (1 day).**
 - `fct_bout_disruption`: bout, withdrawn fighter, replacement, reason (news, else Tapology),
   first report date, **days_notice** = event date − first report.
+- **The fight data decides, the news dates and explains.** A withdrawal or replacement enters
+  `fct_bout_disruption` only when it matches a Tapology cancelled bout (or the bout that
+  replaced it); a news claim with no such bout stays a claim (Chimaev vs Prochazka, 2026: talked
+  about, never booked, not on Tapology). Match on names, not slugs: a Tapology slug can carry an
+  old name (Chimaev is `188143-khamzat-girikhanov`).
 - Fight-week precision: for disruptions reported ≤ 7 days out, fetch the article page once and
   keep only `published_time` (a few thousand pages over 20 years).
 - `fct_fighter_status_event`: retirement / return / suspension / release, each a dated claim with
-  its source. Current status is derived from the sequence (a return after a retirement wins).
+  its source. Current status is derived from the sequence (a return after a retirement wins),
+  and a retirement counts only if it comes after the fighter's last bout: the classifier's
+  false retirements (an injury, a plan, a quote) are erased by the next fight.
 
 **7. Use it (1 day).**
 - Elo: add `short_notice` (the replacement, and the fighter who got a new opponent, on ≤ 14 days)

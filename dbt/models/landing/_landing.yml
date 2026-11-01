@@ -100,6 +100,12 @@ models:
   - name: lnd_news_urls
     description: One row per <url> in a monthly sitemap, as listed on the day it was read. site, url, article_id, url_date (the day in the URL, NULL if it has none), slug, lastmod (the last edit, not publication), sitemap_month.
     columns: *landing_columns
+  - name: lnd_news_articles
+    description: One row per article page read (pipeline/news_articles.py), from its schema.org NewsArticle JSON-LD - headline, description, date_published (exact), date_modified, author, section, body. _raw_html_key is the archived page.
+    columns: *landing_columns
+  - name: lnd_news_events
+    description: One row per (headline, model, prompt version) classified by the local model (pipeline/news_classify.py) - its answer as given (raw), parsed into event_type, status, fighters, replaced_fighter, opponent, event, reason, plus not_mma, the not-MMA filter's verdict. _raw_html_key is null.
+    columns: *landing_columns
 
   # English Wikipedia (pipeline/wikipedia_events.py): the Background section of every
   # UFC event article. _raw_html_key is the archived API response in raw-json/wikipedia/.

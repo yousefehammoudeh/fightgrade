@@ -72,3 +72,41 @@ seeds:
           - relationships: {arguments: {to: ref('cln_mmadecisions_decisions'), field: decision_id}}
       - name: source
         data_tests: [not_null]
+
+  - name: news_event_labels
+    description: >
+      The news gold set: 400 headlines from stg_news_headlines, labelled by hand from
+      the headline alone (experiments/news/LABELS.md has the rules and the sample).
+      Drafted by Claude, reviewed by the user (reviewed = y). It scores the classifier
+      (pipeline/news_classify.py --eval) and the keyword pass's recall.
+    config:
+      column_types:
+        news_url_id: varchar
+        stratum: varchar
+        site: varchar
+        published_date: date
+        headline: varchar
+        event_type: varchar
+        status: varchar
+        fighters: varchar
+        replaced_fighter: varchar
+        opponent: varchar
+        event: varchar
+        reason: varchar
+        reviewed: varchar
+    columns:
+      - name: news_url_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships: {arguments: {to: ref('stg_news_headlines'), field: news_url_id}}
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [withdrawal, replacement, weight_miss, retirement, return, suspension, release,
+                         signing, fought_injured, booking, none]
+      - name: status
+        data_tests:
+          - accepted_values: {arguments: {values: [confirmed, speculative, denied]}}

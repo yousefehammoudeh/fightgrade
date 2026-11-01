@@ -47,6 +47,12 @@ Jobs, all built from main (main_checkout.py) except DEV runs of tapology_crawl:
                    Tapology's 02:00 run and its build: each site's current and
                    previous month, 4 requests. A backfill=true run reads every
                    month not archived yet.
+  news_classify    the new candidate headlines -> a local model (Ollama in the
+                   run's container) -> lnd_news_events, and the flagged ones'
+                   articles read and classified too (orchestration/news.py).
+                   After the PROD build that follows each news_crawl (it puts
+                   the new headlines in stg_news_headlines), by the
+                   classify_after_news_crawl sensor; a few minutes a day.
   wikipedia_crawl  English Wikipedia's UFC event articles -> lake -> LANDING
                    (orchestration/wikipedia.py): the bout changes their
                    Background sections list, dated by their citations. Weekly,
@@ -92,7 +98,7 @@ from .tapology import RETRY_ON_ANOTHER_IP, tapology_crawl
 from .tapology_fighters import tapology_fighter_crawl
 from .judge_lens import judge_lens_train
 from .mmadecisions import mmadecisions_crawl
-from .news import news_crawl
+from .news import news_classify, news_crawl
 from .ufcstats import ufcstats_crawl
 from .wikipedia import wikipedia_crawl
 
@@ -171,7 +177,7 @@ def judge_lens_after_build(context: RunStatusSensorContext) -> RunRequest:
     return RunRequest(run_key=context.dagster_run.run_id)
 
 
-CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl, news_crawl, wikipedia_crawl]
+CRAWLS = [tapology_crawl, ufcstats_crawl, mmadecisions_crawl, tapology_fighter_crawl, news_crawl, news_classify, wikipedia_crawl]
 IP_RETRY_TAG = "fightgrade/ip_retry"
 # With one refused IP in three, four misses in a row is about one night in 80.
 MAX_IP_RETRIES = 3
@@ -196,6 +202,24 @@ def crawl_retry(context: RunFailureSensorContext):
         return SkipReason(f"{run.run_id[:8]} was already retry {tries} of {MAX_IP_RETRIES}")
     return RunRequest(run_key=f"{run.run_id}-ip-retry", job_name=run.job_name, run_config=run.run_config,
                       tags={IP_RETRY_TAG: str(tries + 1)})
+
+
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS, monitored_jobs=[dbt_prod_build],
+                   request_job=news_classify, default_status=SENSOR_STATUS)
+def classify_after_news_crawl(context: RunStatusSensorContext):
+    """The day's new headlines classified once the PROD build after news_crawl has put them
+    in stg_news_headlines: news_crawl -> build -> news_classify -> build (int_news_events).
+    One per news_crawl. news_classify is a crawl to build_after_crawl, so the second build
+    waits for it, and does not start this again."""
+    instance = context.instance
+    crawl = next(iter(instance.get_run_records(
+        RunsFilter(job_name=news_crawl.name, statuses=[DagsterRunStatus.SUCCESS]), limit=1)), None)
+    if not crawl:
+        return SkipReason("news_crawl has not succeeded yet")
+    last = next(iter(instance.get_run_records(RunsFilter(job_name=news_classify.name), limit=1)), None)
+    if last and (last.create_timestamp.timestamp() >= (crawl.end_time or 0)):
+        return SkipReason(f"news_crawl {crawl.dagster_run.run_id[:8]} is already classified")
+    return RunRequest(run_key=f"classify-{crawl.dagster_run.run_id}")
 
 
 IN_PROGRESS = [DagsterRunStatus.QUEUED, DagsterRunStatus.NOT_STARTED, DagsterRunStatus.STARTING,
@@ -260,5 +284,5 @@ defs = Definitions(
             default_status=SCHEDULE_STATUS,
         ),
     ],
-    sensors=[resync_dev, judge_lens_after_build, crawl_retry, build_after_crawl],
+    sensors=[resync_dev, judge_lens_after_build, crawl_retry, build_after_crawl, classify_after_news_crawl],
 )
