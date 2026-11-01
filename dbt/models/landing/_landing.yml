@@ -100,3 +100,10 @@ models:
   - name: lnd_news_urls
     description: One row per <url> in a monthly sitemap, as listed on the day it was read. site, url, article_id, url_date (the day in the URL, NULL if it has none), slug, lastmod (the last edit, not publication), sitemap_month.
     columns: *landing_columns
+
+  # English Wikipedia (pipeline/wikipedia_events.py): the Background section of every
+  # UFC event article. _raw_html_key is the archived API response in raw-json/wikipedia/.
+  # CC BY-SA 4.0: revid and source_url attribute every row to its revision.
+  - name: lnd_wikipedia_bout_changes
+    description: One row per Background sentence that describes a bout change (withdrawal, replacement, cancellation, bout moved, weight miss) - the pairing before it, withdrawn_fighter, replacement_fighter, reason as written, and citations [{url, title, date, date_iso, website}] whose date is when the change was reported. refers_to_event is set when the sentence is about an earlier booking at another event.
+    columns: *landing_columns
