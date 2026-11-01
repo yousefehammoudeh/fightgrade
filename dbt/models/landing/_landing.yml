@@ -94,3 +94,9 @@ models:
   - name: lnd_mmadecisions_fan_scores
     description: The fan scores the page lists (top finals and top 3 per round), as %, with est_count = % x submissions.
     columns: *landing_columns
+
+  # MMA news (pipeline/news_sitemaps.py): MMA Fighting's and MMA Mania's monthly
+  # sitemaps. _raw_html_key is the archived sitemap in raw-xml/news/.
+  - name: lnd_news_urls
+    description: One row per <url> in a monthly sitemap, as listed on the day it was read. site, url, article_id, url_date (the day in the URL, NULL if it has none), slug, lastmod (the last edit, not publication), sitemap_month.
+    columns: *landing_columns
