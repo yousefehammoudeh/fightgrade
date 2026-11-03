@@ -37,12 +37,12 @@ winning -- draw or NC), `still_vacant`, `vacated`, and null when there is no res
 Outputs `data/bout_title_stakes.jsonl`, one row per (bout, belt) -- a unification bout
 yields one row per belt, because the stakes differ per belt.
 
-  python3 scrapers/derive/bout_title_stakes.py
+  python3 derive/bout_title_stakes.py
 """
 import json, collections, datetime, sys, re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 
 # 200/300/400/500 kg, converted to lb. A promotion writes its uncapped class this way.

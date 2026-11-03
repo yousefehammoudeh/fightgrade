@@ -1,7 +1,7 @@
 # FightGrade — MMA data platform
 
 **Build window:** 2026-10-24 → 2026-11-05 (technical deep dive, Nov 5)
-**Revision 2** — rewritten after reading `HANDOFF.md`, `HANDOFF.stage2.md` and all 19 `docs/`.
+**Revision 2** — rewritten after reading `docs/history/HANDOFF.md`, `docs/history/HANDOFF.stage2.md` and all 19 `docs/`.
 Revision 1 is in the scratchpad; three of its assumptions were wrong (§12).
 
 **Two products off one pipeline:**
@@ -162,7 +162,7 @@ strength** and never "promotion strength", and promotion names are never used to
 170,678 pages are archived gzipped at `data/html/` (104,397 event pages, 5.7 GB) and
 `data/html_bouts/` (66,281 bout pages, 3.1 GB), sha1-sharded two levels deep.
 
-**The replay path is already implemented.** `scrapers/driver/reparse.py` and `reparse3b.py`
+**The replay path is already implemented.** `pipeline/tapology_archive/reparse.py` and `reparse3b.py`
 rebuild the parsed tables from the archive with **no network**: ~3.5 h for the full event corpus
 against **26 h to crawl it**. Both stage `*.rebuilt.jsonl` and refuse to commit if the rebuild has
 fewer rows, and the stage-3b drift guard diffs **every pre-existing key** and refuses to commit on
@@ -198,7 +198,7 @@ failure and spend alarms).
 
 ### 4.4 Can the crawler run in the cloud? Tested, and the answer changed
 
-`HANDOFF.stage2.md` §3 concluded Cloudflare needs **headed real Chrome on a logged-in macOS
+`docs/history/HANDOFF.stage2.md` §3 concluded Cloudflare needs **headed real Chrome on a logged-in macOS
 desktop**, which would make the crawler permanently un-containerisable. That table has an
 **untested cell**: only *headless* Chromium and *headed real Chrome* were ever measured — never
 **headed bundled Chromium**.
@@ -499,7 +499,7 @@ CLOUD
 ### Backfilling the Tapology gap needs the SITEMAP, not `schedule=results`
 
 `schedule=results` **caps at ~15 pages** (~375 events) — "recent results only, not an archive"
-(`HANDOFF.md` §7). The 62-day gap is ~1,750 events, so it does not fit.
+(`docs/history/HANDOFF.md` §7). The 62-day gap is ~1,750 events, so it does not fit.
 
 The documented completeness method does: `https://www.tapology.com/sitemap.xml` is a sitemap index
 of 476 sub-sitemaps, of which **46 are events**. 46 requests enumerated 104,984 slugs last time;
@@ -1007,7 +1007,7 @@ longer blocks the build. If headed Chrome itself will not clear the challenge, t
 cannot be filled and the incremental story falls back to UFC Stats + MMADecisions, with Tapology
 loaded from the archive only.
 
-Operational traps still worth keeping from `HANDOFF.md`: never run two crawlers (they race on the
+Operational traps still worth keeping from `docs/history/HANDOFF.md`: never run two crawlers (they race on the
 archive temp file — keep the single-instance lock); `--sleep 1.0` is the measured throughput
 ceiling, do not go below it; guard against Tapology's "Temporarily Unavailable" page, which
 returns a normal status code and silently poisoned 450 events before it was caught; and never

@@ -8,13 +8,13 @@
   STRENGTH = f(promotion_id, sport, date, level) -> [0, 1],  0.5 = that era's median
                                                              professional promotion
 
-`scrapers/derive/promotion_strength.py` -> `data/promotion_strength.jsonl`. ~2 min
+`derive/promotion_strength.py` -> `data/promotion_strength.jsonl`. ~2 min
 (~2.5 with `--rebuild-cache`), no network.
 
-    python3 scrapers/derive/promotion_strength.py
-    python3 scrapers/derive/promotion_strength.py --export-ceiling
-    python3 scrapers/derive/promotion_strength.py --at 61,"Muay Thai",2025-06-14   # exact
-    python3 scrapers/derive/promotion_strength.py --query 61,"Muay Thai",2025-06-14 # gridded
+    python3 derive/promotion_strength.py
+    python3 derive/promotion_strength.py --export-ceiling
+    python3 derive/promotion_strength.py --at 61,"Muay Thai",2025-06-14   # exact
+    python3 derive/promotion_strength.py --query 61,"Muay Thai",2025-06-14 # gridded
     python3 scripts/validate_promotion_strength.py            # Major-Org separation
     python3 scripts/promotion_leaderboard.py --date 2026-08-01 --active-within 365
 

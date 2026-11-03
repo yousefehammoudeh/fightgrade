@@ -1,6 +1,6 @@
 # Can the Tapology crawler run in a container?
 
-**Question.** `HANDOFF.stage2.md` §3 concluded that Cloudflare requires *headed real Chrome* on a
+**Question.** `docs/history/HANDOFF.stage2.md` §3 concluded that Cloudflare requires *headed real Chrome* on a
 logged-in macOS desktop, which would mean the crawler can never be containerised or run as a cloud
 job. That table has an untested cell: **headed bundled Chromium**. Only *headless* Chromium and
 *headed real Chrome* were ever measured.

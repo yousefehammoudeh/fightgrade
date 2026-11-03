@@ -40,8 +40,7 @@ BASE = "http://www.ufcstats.com"
 LISTING = f"{BASE}/statistics/events/completed"
 FIGHTER_LISTING = f"{BASE}/statistics/fighters?char={{}}&page=all"
 
-sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from ufcstats_extract import (CHALLENGE_MARK, parse_event, parse_events_list, parse_fight,  # noqa: E402
+from .parsers.ufcstats import (CHALLENGE_MARK, parse_event, parse_events_list, parse_fight,  # noqa: E402
                               parse_fighter, parse_fighters_list)
 
 TABLES = ("ufcstats_events", "ufcstats_fights", "ufcstats_fight_totals", "ufcstats_fight_rounds",

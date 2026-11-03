@@ -22,12 +22,12 @@ Outputs
   data/promotion_strength.jsonl   one row per (promotion_id, sport, quarter)
   logs/promotion_strength.log     field sizes, coverage, and the top table per sport
 
-  python3 scrapers/derive/promotion_strength.py [--sport MMA] [--rebuild-cache]
+  python3 derive/promotion_strength.py [--sport MMA] [--rebuild-cache]
 """
 import argparse, bisect, json, collections, math, pickle, re, sys, datetime as dt
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA, STATE = ROOT / "data", ROOT / "logs"
 CACHE = Path("/private/tmp/claude-501/-Users-yousefhammoudeh-Desktop-MMA-Data/"
              "5232c7f8-9841-4c55-998a-e3eaa03a2978/scratchpad/ps_cache.pkl")

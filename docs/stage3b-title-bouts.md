@@ -108,7 +108,7 @@ cannot produce a row for it. The flag admits `--worklist` slugs that the index d
 know, taking `bout_id` from the leading number of the slug and sorting them last:
 
 ```bash
-python3 scrapers/driver/crawl_stage3b.py     --worklist logs/cancelled_worklist.txt --include-unindexed --sleep 1.0
+python3 -m pipeline.tapology_archive.crawl_stage3b     --worklist logs/cancelled_worklist.txt --include-unindexed --sleep 1.0
 ```
 
 ### Pacing
@@ -126,7 +126,7 @@ as battery** -- only the display being on was holding it up. Start caffeinate bo
 crawler's PID so it releases itself on exit:
 
 ```bash
-nohup python3 scrapers/driver/crawl_stage3b.py ... & CRAWL=$!
+nohup python3 -m pipeline.tapology_archive.crawl_stage3b ... & CRAWL=$!
 nohup caffeinate -i -m -s -w $CRAWL >/dev/null 2>&1 &
 ```
 
@@ -149,7 +149,7 @@ nothing. Always use the `bout_slug` captured from the event page. All 59,977 hav
 
 ## 4. Implementation
 
-**Copy `scrapers/driver/crawl_stage3.py`.** Everything that matters is already there and
+**Copy `pipeline/tapology_archive/crawl_stage3.py`.** Everything that matters is already there and
 proven over 104k pages: checkpointing, atomic writes, the archive, in-process browser
 recovery, immediate-rotation-on-503, the LRU VPN pool with self-retiring regions, the
 single-instance lock, the "Temporarily Unavailable" guards, and the completion flag.
@@ -159,7 +159,7 @@ Change exactly four things:
 1. **Worklist** — bout slugs from §2 instead of event slugs from `events.jsonl`.
 2. **URL** — `/fightcenter/bouts/` instead of `/fightcenter/events/`.
 3. **Extractor** — `parse_bout_page()` instead of `parse_event()`. It already exists in
-   `scrapers/extract/tapology_extract.py` and is tested against MMA, boxing, karate,
+   `pipeline/parsers/tapology.py` and is tested against MMA, boxing, karate,
    kickboxing, muay thai, wrestling, sanda and a 2011 legacy page.
 4. **Outputs** — write `data/bout_details.jsonl` keyed by `bout_slug`. Archive HTML to
    `data/html_bouts/<aa>/<bb>/<slug>.html.gz` (same sha1 sharding; **do not** mix it into

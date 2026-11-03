@@ -3,7 +3,7 @@
 # libraries, and Xvfb for the virtual display headed Chrome draws into.
 #
 # The project is installed editable from /app, so the code sees the repo's own
-# layout — scrapers/ for the extractor, dbt/ for the models — exactly as on a
+# layout — pipeline/ for the crawlers and parsers, dbt/ for the models — exactly as on a
 # laptop.
 FROM python:3.13-slim-bookworm
 

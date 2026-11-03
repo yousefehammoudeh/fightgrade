@@ -1,7 +1,7 @@
 # Stage-3 extraction: what is gettable, and how the page varies
 
 Verified against 7 event pages and 3 bout pages spanning 2009–2026, five sports and
-four promotion tiers. Extractor: `scrapers/extract/tapology_extract.py`
+four promotion tiers. Extractor: `pipeline/parsers/tapology.py`
 (`parse_event`, `parse_bout_page`). Raw HTML kept in `samples/` and `samples/live/`.
 
 ## Verdict

@@ -4,7 +4,7 @@
 
 Who held what, when, and how each reign began and ended.
 
-`scrapers/derive/belt_lineage.py` -> `data/belt_reigns.jsonl`, `logs/lineage_audit.log`.
+`derive/belt_lineage.py` -> `data/belt_reigns.jsonl`, `logs/lineage_audit.log`.
 ~8 s, no network. Depends on `belts.py` (see `belts.md`) and the stage-3b crawl.
 
 ## Two independent signals

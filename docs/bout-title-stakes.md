@@ -8,7 +8,7 @@ A lineage answers *who was champion*. Elo needs the other question: **what could
 fighter win or lose in this bout**. Those come apart, and the cases that separate them are
 exactly the ones a lineage gets wrong.
 
-`scrapers/derive/bout_title_stakes.py` -> `data/bout_title_stakes.jsonl`. ~10 s, no network.
+`derive/bout_title_stakes.py` -> `data/bout_title_stakes.jsonl`. ~10 s, no network.
 One row per **(bout, belt)** -- a unification yields one row per belt, because the stakes
 differ per belt. An interim title is the same belt (see belts.py), so it does not add a row.
 
@@ -99,7 +99,7 @@ block into `event_details.jsonl -> cancelled_bouts` with the status and the reas
 **not** whether it was for a title: that is a championship-belt SVG flanking the status
 pill, with no text anywhere in the row.
 
-`scrapers/derive/cancelled_bouts.py` -> `data/cancelled_title_bouts.jsonl` recovers it from
+`derive/cancelled_bouts.py` -> `data/cancelled_title_bouts.jsonl` recovers it from
 `data/html/` with no crawl --
 `id='sectionCancelled'`, rows keyed `id='bout<ID>Cancelled'`, and
 `<svg class="... fill-tap_darkgold">` present twice on a title bout and not at all

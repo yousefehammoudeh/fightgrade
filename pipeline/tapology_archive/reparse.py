@@ -12,19 +12,14 @@ are byte-identical to the serial version -- --jobs only changes how long it take
 Writes to *.rebuilt.jsonl first and only swaps them in when the run completes and the
 row counts pass sanity checks, so an interrupted re-parse cannot damage a good dataset.
 
-  python3 scrapers/driver/reparse.py [--limit N] [--jobs N] [--out-dir D] [--commit]
+  python3 -m pipeline.tapology_archive.reparse [--limit N] [--jobs N] [--out-dir D] [--commit]
 """
 import argparse, gzip, json, os, sys, time, collections, pathlib
 import multiprocessing as mp
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from tapology_extract import parse_event                      # noqa: E402
-sys.path.insert(0, str(ROOT / "scrapers" / "driver"))
-import importlib.util
-spec = importlib.util.spec_from_file_location("c3", ROOT/"scrapers"/"driver"/"crawl_stage3.py")
-c3 = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(c3)                                    # reuse flatten()/qa()
+from pipeline.parsers.tapology import parse_event             # noqa: E402
+from pipeline.tapology_archive import crawl_stage3 as c3       # noqa: E402  reuse flatten()/qa()
 
 DATA, STATE = ROOT / "data", ROOT / "logs"
 

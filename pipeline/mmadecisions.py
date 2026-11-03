@@ -10,7 +10,7 @@ is the other crawlers' (pipeline/tapology.py, pipeline/ufcstats.py): headed
 Chrome loads the event index once, then every page is a same-origin fetch()
 inside that page, archived as the server sent it.
 
-Six tables (scrapers/extract/mmadecisions_extract.py), parsed from the
+Six tables (pipeline/parsers/mmadecisions.py), parsed from the
 archived pages: events, decisions, judge_rounds, judge_totals, media_scores,
 fan_scores. `--replay` re-parses the latest copy of every archived page from
 the bucket with no requests to MMADecisions: a parser change is replayed,
@@ -38,8 +38,7 @@ RUNS = ROOT / "_crawlruns" / "mmadecisions"
 BASE = "https://mmadecisions.com"
 INDEX = BASE + "/decisions-by-event/{}/"
 
-sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from mmadecisions_extract import (index_years, parse_decision, parse_event, parse_event_decisions,  # noqa: E402
+from .parsers.mmadecisions import (index_years, parse_decision, parse_event, parse_event_decisions,  # noqa: E402
                                   parse_event_index)
 
 TABLES = ("mmadecisions_events", "mmadecisions_decisions", "mmadecisions_judge_rounds",

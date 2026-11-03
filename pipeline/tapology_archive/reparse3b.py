@@ -14,18 +14,14 @@ rows -- a re-parse must not invent or drop it.
 Writes bout_details.rebuilt.jsonl and only swaps it in under --commit, after the
 row count and key fields are checked against the existing file.
 
-  python3 scrapers/driver/reparse3b.py [--limit N] [--jobs N] [--commit]
+  python3 -m pipeline.tapology_archive.reparse3b [--limit N] [--jobs N] [--commit]
 """
 import argparse, gzip, json, sys, time, pathlib, collections
 import multiprocessing as mp
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from tapology_extract import parse_bout_page                   # noqa: E402
-import importlib.util
-spec = importlib.util.spec_from_file_location("c3b", ROOT/"scrapers"/"driver"/"crawl_stage3b.py")
-c3b = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(c3b)                                   # reuse flatten()/qa()
+from pipeline.parsers.tapology import parse_bout_page         # noqa: E402
+from pipeline.tapology_archive import crawl_stage3b as c3b     # noqa: E402  reuse flatten()/qa()
 
 DATA = ROOT / "data"
 SRC  = DATA / "bout_details.jsonl"

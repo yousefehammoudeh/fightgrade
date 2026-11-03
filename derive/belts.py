@@ -23,12 +23,12 @@ Outputs
   data/bout_belts.jsonl   bout -> belt links (a unification bout yields several)
   logs/belt_worklist.txt  bout slugs on a belt with >= --min-bouts bouts (stage 3b queue)
 
-  python3 scrapers/derive/belts.py [--min-bouts N]
+  python3 derive/belts.py [--min-bouts N]
 """
 import argparse, json, collections, re, sys, hashlib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA, STATE = ROOT / "data", ROOT / "logs"
 
 TYPO = {"straweight": "strawweight", "crusierweight": "cruiserweight",

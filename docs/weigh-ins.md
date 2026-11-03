@@ -3,7 +3,7 @@
 **Purpose:** what each fighter actually scaled at, as opposed to what the bout was
 contracted at.
 
-`scrapers/derive/weigh_ins.py` -> `data/bout_weigh_ins.jsonl`. ~40 s, no network — it reads
+`derive/weigh_ins.py` -> `data/bout_weigh_ins.jsonl`. ~40 s, no network — it reads
 the archived bout pages in `data/html_bouts/`.
 
 The contracted weight says a bout was booked at 125 lb. It does not say whether either man

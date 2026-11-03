@@ -9,7 +9,7 @@ dependencies = [
     "dagster-cloud==1.13.26",
     "dbt-core==1.12.6",
     "dbt-snowflake==1.12.4",
-    # the crawlers (pipeline/, scrapers/) and the lake they write to
+    # the crawlers and parsers (pipeline/) and the lake they write to
     "beautifulsoup4==4.15.0",
     "duckdb==2.0.0",
     "google-cloud-storage==3.17.1",

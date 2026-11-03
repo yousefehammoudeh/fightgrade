@@ -69,14 +69,14 @@ detection above will still surface them.
 
 **Gap.** Stage 3b captured belt status but discarded tournament placement. Tapology
 renders `Tournament:` and `Tournament Round:` in the same label/value list as
-`Belt Status Before Fight:`, so `tapology_extract.parse_bout_page` was **already
+`Belt Status Before Fight:`, so `parsers.tapology.parse_bout_page` was **already
 returning them** in `info` — `crawl_stage3b.flatten()` simply never wrote them out.
 
 **Fix, no re-crawl.** Exactly the scenario the HTML archive exists for. Two lines
 added to `flatten()`, then the current extractor replayed over `data/html_bouts/`
 (2.2 GB, 46,893 pages) in ~140 s. The extractor itself needed no change.
 
-Added `scrapers/driver/reparse3b.py` — the stage-3b counterpart to `reparse.py`,
+Added `pipeline/tapology_archive/reparse3b.py` — the stage-3b counterpart to `reparse.py`,
 which only covered stage 3 (events). Same contract: no network, `*.rebuilt.jsonl`
 staged first, committed only after checks pass.
 
@@ -160,7 +160,7 @@ Removed rows are **quarantined** in `data/removed_cancelled/`, not just backed u
 any subset can be reinstated without a crawl. Per-file `.pre-cancelfix.bak` alongside.
 
 **Derived tables were regenerated, not hand-edited.** `bout_belts.jsonl`,
-`belts.jsonl` and `belt_reigns.jsonl` come from `scrapers/derive/belts.py` then
+`belts.jsonl` and `belt_reigns.jsonl` come from `derive/belts.py` then
 `belt_lineage.py`. Before deleting anything, both were re-run on untouched data and
 their output was **byte-identical** to the committed files, proving the derive is
 reproducible and that any post-deletion change is attributable to the deletion alone.

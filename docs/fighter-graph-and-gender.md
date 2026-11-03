@@ -32,7 +32,7 @@ bouts fall outside it, against 12% of Amateur, 33% of Juniors and 48% of Kids.
 
 ## 2. DECISION (locked): the canonical modelling population is 365,907
 
-Reproduced by `scrapers/derive/fighter_population.py` -> `data/fighter_gender.jsonl`
+Reproduced by `derive/fighter_population.py` -> `data/fighter_gender.jsonl`
 (one row per fighter in the corpus, `in_population` flags membership). ~20 s, no network.
 
 ```

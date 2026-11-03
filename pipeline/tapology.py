@@ -6,7 +6,7 @@
 The method is the archive's, unchanged (docs/scraping-method.md): headed real
 Chrome clears Cloudflare once, then every page is a same-origin fetch() inside
 that page at >= 2 s pacing. Rows are built by the same extractor and flatten()
-that scrapers/driver/reparse.py uses, so a new partition has exactly the shape
+that pipeline/tapology_archive/reparse.py uses, so a new partition has exactly the shape
 of the 820k rows already in LANDING.
 
 Only COMPLETED events are kept. Discovery is /fightcenter?schedule=results,
@@ -20,9 +20,9 @@ at most DAILY_BUDGET requests a run. Work the budget cannot reach is queued in
 the lake for the next run, never dropped. A Cloudflare challenge
 mid-run gets a minute of quiet and one ordinary page load, at most twice; a 503
 or 429 ends the run at once. Either way the crawl stops instead of hammering — a
-block that is kept warm never clears (HANDOFF.stage2.md §3).
+block that is kept warm never clears (docs/history/HANDOFF.stage2.md §3).
 """
-import argparse, gzip, importlib.util, json, os, re, select, shutil, subprocess, sys, tempfile, time
+import argparse, gzip, json, os, re, select, shutil, subprocess, sys, tempfile, time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -39,20 +39,10 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "_crawlruns"
 BASE = "https://www.tapology.com"
 
-sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from tapology_extract import parse_bout_page, parse_event  # noqa: E402
-
-
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
+from .parsers.tapology import parse_bout_page, parse_event
 
 # flatten() / qa() / the fetch JS, exactly as the archive crawl and reparse use them.
-c3 = _load("crawl_stage3", ROOT / "scrapers" / "driver" / "crawl_stage3.py")
-c3b = _load("crawl_stage3b", ROOT / "scrapers" / "driver" / "crawl_stage3b.py")
+from .tapology_archive import crawl_stage3 as c3, crawl_stage3b as c3b
 
 TABLES = ("event_details", "bouts", "event_fighters", "bout_details")
 EVENT_LINK = re.compile(r"/fightcenter/events/(\d+-[A-Za-z0-9-]+)")
@@ -78,13 +68,13 @@ DEFAULT_SLEEP = 4.0
 RECLEAR_WAIT = 60           # seconds of quiet before re-loading a challenged page
 MAX_RECLEARS = 2            # per run; past that, stop rather than push
 # The run's budget. The VPN crawl measured ~530 events per IP at 1.0 s before
-# Tapology's first 503, and rotated proactively at 450 (HANDOFF.md §8). There is
+# Tapology's first 503, and rotated proactively at 450 (docs/history/HANDOFF.md §8). There is
 # no rotation here, so 450 is what one run may spend, discovery and retries
 # included. A peak Saturday is ~268 pages. What a run cannot fetch waits in the
 # queue for the next one. A backfill also keeps a per-IP daily ledger (ip_budget).
 DAILY_BUDGET = 450
 MAX_FETCH_MINUTES = 30      # stop fetching by then: the run, and the PROD build after it, end by ~02:40
-RATE_LIMITED = (429, 503)   # per-IP: waiting does nothing (HANDOFF.md §8), so stop and defer
+RATE_LIMITED = (429, 503)   # per-IP: waiting does nothing (docs/history/HANDOFF.md §8), so stop and defer
 MAX_TRIES = 7               # days an event may stay unfinished in the queue before it is dropped
 DISCOVERY_SHARE = 3         # discovery may spend at most 1/3 of a run's budget
 RESUME_OVERLAP = 6          # results pages a day's new events can push the listing down, and then some
