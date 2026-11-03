@@ -6,11 +6,11 @@
 
   kappa(a -> b)  =  rating points gained in sport b per rating point earned in sport a
 
-`scrapers/derive/cross_sport_transfer.py` -> `data/cross_sport_transfer.json`. ~40 s off the
+`derive/cross_sport_transfer.py` -> `data/cross_sport_transfer.json`. ~40 s off the
 cached bout table, no network.
 
-    python3 scrapers/derive/cross_sport_transfer.py
-    python3 scrapers/derive/cross_sport_transfer.py --validate
+    python3 derive/cross_sport_transfer.py
+    python3 derive/cross_sport_transfer.py --validate
 
 ## Why it exists
 

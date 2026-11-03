@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Stage-3b crawler: TITLE bout pages -> raw HTML archive + belt-status records.
-
-Copy of crawl_stage3.py per docs/stage3b-title-bouts.md; the browser, VPN pool,
-rotation, checkpointing and archive machinery are unchanged because they are proven
-over 104k pages. Four things differ: the worklist (title bouts, not events), the URL
-path, the extractor, and the outputs.
-
-Captures BELT STATUS (Title on Line, Belt Status Before Fight) and TOURNAMENT
-PLACEMENT (Tournament, Tournament Round). Gym and "Fighting out of" are deliberately
-not kept.
+"""Stage-3 crawler: event pages -> raw HTML archive + parsed records + QA report.
 
 Method is stage 2's, unchanged (see docs/scraping-method.md): headed real Chrome holds
 the Cloudflare clearance, all fetching happens as same-origin fetch() inside that page.
@@ -26,7 +17,7 @@ Outputs (all append-only, resumable):
   logs/status3.json, logs/crawl3.log
 
 Usage:
-  python3 scrapers/driver/crawl_stage3.py [--limit N] [--sleep SECS] [--newest-first]
+  python3 -m pipeline.tapology_archive.crawl_stage3 [--limit N] [--sleep SECS] [--newest-first]
 """
 import argparse, gzip, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time
 from collections import Counter
@@ -34,22 +25,22 @@ from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scrapers" / "extract"))
-from tapology_extract import parse_bout_page                  # noqa: E402
+from pipeline.parsers.tapology import parse_event             # noqa: E402
 from playwright.sync_api import sync_playwright                # noqa: E402
 from playwright._impl._errors import TargetClosedError, Error as PWError  # noqa: E402
 
 STATE   = ROOT / "logs"
 STATE_DIR = STATE
-BOUTS_IN = ROOT / "data" / "bouts.jsonl"          # worklist source
-EVDET_IN = ROOT / "data" / "event_details.jsonl"  # for event dates / status
-HTMLDIR = ROOT / "data" / "html_bouts"            # NOT data/html -- that is the event archive
-DETAILS = ROOT / "data" / "bout_details.jsonl"
-ANOM    = STATE / "anomalies_bouts.jsonl"
-LABELS  = STATE / "labels_bouts.json"
-DONE    = STATE / "bouts_done.txt"
-STATUS  = STATE / "status3b.json"
-LOG     = STATE / "crawl3b.log"
+EVENTS  = ROOT / "data" / "events.jsonl"
+HTMLDIR = ROOT / "data" / "html"
+DETAILS = ROOT / "data" / "event_details.jsonl"
+BOUTS   = ROOT / "data" / "bouts.jsonl"
+EFIGHT  = ROOT / "data" / "event_fighters.jsonl"
+ANOM    = STATE / "anomalies.jsonl"
+LABELS  = STATE / "labels.json"
+DONE    = STATE / "events_done.txt"
+STATUS  = STATE / "status3.json"
+LOG     = STATE / "crawl3.log"
 
 EXPRESSVPNCTL = "/Applications/ExpressVPN.app/Contents/MacOS/expressvpnctl"
 VPN_CANDIDATES = STATE_DIR / "vpn_candidates.txt"   # every region the CLI offers
@@ -93,14 +84,11 @@ def save_vpn_pool(st):
 JS = r"""
 async (u) => {
   try {
-    const r = await fetch(u, {credentials:"include"});
+    // A request that never settles (a VPN exit swap mid-fetch, 2026-10-29) hung the run for
+    // hours: page.evaluate has no timeout of its own. The abort covers the body read too.
+    const r = await fetch(u, {credentials:"include", signal: AbortSignal.timeout(60000)});
     const b = await r.text();
     if (/Just a moment/i.test(b)) return {status:"CHALLENGE", html:null};
-    // A dead bout slug returns 200 and silently serves /fightcenter. No IP change can
-    // fix that, so it must not look like a block. docs/stage3b-title-bouts.md warns
-    // about this for CONSTRUCTED slugs -- Tapology also emits broken ones itself.
-    if (r.url && r.url.replace(/\/$/,"") !== u.replace(/\/$/,""))
-      return {status:"REDIRECT", html:null, to:r.url};
     // Tapology serves a tiny "Temporarily Unavailable" page under load. It arrives as a
     // normal response, so without this check it gets archived, parses to nothing, and
     // the event is marked done -- silently lost.
@@ -124,6 +112,25 @@ def log(msg):
     with LOG.open("a") as f:
         f.write(line + "\n")
 
+def event_date(raw, this_year):
+    """Row text carries a full date for past years and a YEARLESS one for the current
+    year ("Saturday, August 15, 5:30 PM ET"). Returns (date, precision)."""
+    m = re.search(r"(January|February|March|April|May|June|July|August|September|"
+                  r"October|November|December) (\d{1,2}), (\d{4})", raw or "")
+    if m:
+        try:
+            return date(int(m.group(3)), MON[m.group(1)], int(m.group(2))), "full"
+        except ValueError:
+            pass
+    m = re.search(r"(January|February|March|April|May|June|July|August|September|"
+                  r"October|November|December) (\d{1,2}),", raw or "")
+    if m:
+        try:
+            return date(this_year, MON[m.group(1)], int(m.group(2))), "assumed_year"
+        except ValueError:
+            pass
+    return date(9999, 12, 31), "unknown"
+
 def html_path(slug):
     h = hashlib.sha1(slug.encode()).hexdigest()
     return HTMLDIR / h[:2] / h[2:4] / (slug + ".html.gz")
@@ -133,125 +140,129 @@ def load_done():
         return set()
     return {l.strip() for l in DONE.read_text().splitlines() if l.strip()}
 
-def build_worklist(newest_first=False, completed_only=False, any_kind=False):
-    """Title bouts only. `title_kind == "title"` excludes `"tournament"`, which is
-    bracket rounds (IBJJF finals, ADCC, Olympic draws) carrying no belt information."""
-    ev = {}
-    for line in EVDET_IN.read_text(encoding="utf-8").splitlines():
+def build_worklist(newest_first=False):
+    this_year = date.today().year
+    rows = []
+    for line in EVENTS.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
-            d = json.loads(line)
-        except Exception:
-            continue
-        ev[d["event_slug"]] = (d.get("event_date_index") or "9999-12-31",
-                               d.get("status"))
-    rows, seen = [], set()
-    for line in BOUTS_IN.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            b = json.loads(line)
+            e = json.loads(line)
         except Exception:
             continue                       # tolerate a torn line rather than crash-loop
-        # An explicit --worklist may name tournament finals that founded a lineage
-        # (see docs/belts.md); those are not title_kind == "title".
-        if not any_kind and b.get("title_kind") != "title":
-            continue
-        slug = b.get("bout_slug")
-        if not slug or slug in seen:       # never construct a slug -- see the doc
-            continue
-        d, st = ev.get(b.get("event_slug"), ("9999-12-31", None))
-        if completed_only and st != "Completed":
-            continue
-        seen.add(slug)
-        rows.append({"date": d, "status": st, "slug": slug,
-                     "bout_id": b.get("bout_id"), "event_slug": b.get("event_slug"),
-                     "sport": b.get("sport_base"), "title_bout": b.get("title_bout")})
-    rows.sort(key=lambda r: (r["date"], r["bout_id"] or 0), reverse=newest_first)
-    return rows
+        d, prec = event_date(e.get("raw_row_text"), this_year)
+        rows.append({"date": d.isoformat(), "date_precision": prec,
+                     "event_id": e.get("event_id"), "slug": e.get("event_slug"),
+                     "promotion_id": e.get("promotion_id")})
+    seen, uniq = set(), []
+    for r in sorted(rows, key=lambda r: (r["date"], r["event_id"] or 0),
+                    reverse=newest_first):
+        if r["slug"] and r["slug"] not in seen:
+            seen.add(r["slug"]); uniq.append(r)
+    return uniq
 
 # ------------------------------------------------------------------ QA ------
-VACANT_RE = re.compile(r"^\s*vacant\s*$", re.I)
-HELD_RE   = re.compile(r"^\s*held\s+by\s+(.+?)\s*$", re.I)
-
-def belt_status_kind(v):
-    """Three states, not two: held, vacant, or the label absent entirely."""
-    if v is None:
-        return "absent", None
-    if VACANT_RE.match(v):
-        return "vacant", None
-    m = HELD_RE.match(v)
-    if m:
-        return "held", m.group(1)
-    return "other", v
-
-def qa(b, row):
+def qa(ev, row):
+    """Invariants. Anything here lands in anomalies.jsonl for a human pass -- the point
+    is that a silently-empty field is reported, not discovered months later."""
     out = []
     def flag(code, detail=""):
-        out.append({"bout_slug": row["slug"], "code": code, "detail": detail})
-    if not b.get("parse_ok"):
-        flag("parse_not_ok")
-    info = b.get("info") or {}
-    if "Title on Line:" not in (b.get("info_raw") or {}):
-        # we selected this bout *because* the event page called it a title fight
-        flag("no_title_on_line_label", str(row.get("title_bout"))[:80])
-    # Test the LABEL, not the value. Tapology renders "Belt Status Before Fight: N/A"
-    # on a third of title bouts and val() maps N/A to None, so a value test would flag
-    # 34% of a healthy crawl as broken -- and a key test can never fire at all, because
-    # the key is present whenever the label is. Only a missing label is a real defect.
-    if "Belt Status Before Fight:" not in (b.get("info_raw") or {}):
-        flag("no_belt_status_label", row.get("sport") or "")
-    kind, _ = belt_status_kind(info.get("belt_status_before_fight"))
-    if kind == "other":
-        flag("belt_status_unrecognised", str(info.get("belt_status_before_fight"))[:80])
-    if len(b.get("fighters") or []) < 2:
-        flag("fewer_than_2_fighters", str(len(b.get("fighters") or [])))
+        out.append({"slug": row["slug"], "code": code, "detail": str(detail)[:200]})
+    if not ev.get("parse_ok"):
+        flag("parse_failed", "no production block and no bouts")
+        return out                          # everything else would be noise
+    if not ev.get("bouts"):
+        # Tapology states "No fight card available for this event" on records it simply
+        # has no card for -- that is known-empty, not a scrape failure.
+        if ev.get("card_note") or ev.get("status") == "Cancelled":
+            flag("zero_bouts_declared", ev.get("card_note") or ev.get("status"))
+        else:
+            flag("zero_bouts_unexplained")
+    if not ev["production"].get("date_time"):
+        flag("no_date")
+    if not ev["promotion"].get("promotion_slug"):
+        flag("no_promotion")
+    if not ev.get("bout_counts_agree"):
+        flag("counts_disagree", f"card={ev['bout_counts']} declared={ev['bout_counts_declared']}")
+    if ev.get("status") == "Completed":
+        for b in ev["bouts"]:
+            if any(f["result"] for f in b["fighters"]):
+                continue
+            if (b["method"] or "").strip().lower() == "result unknown":
+                continue          # the page says so explicitly; nothing was missed
+            flag("completed_bout_no_result", b["bout_slug"] or b["bout_id"])
+            break
+    for b in ev["bouts"]:
+        if len(b["fighters"]) != 2:
+            flag("bout_not_two_fighters", b["bout_id"])
+        if any(not f["fighter_slug"] for f in b["fighters"]):
+            flag("fighter_without_slug", b["bout_id"])
+        if not b["sport"]:
+            flag("bout_without_sport", b["bout_id"])
     return out
 
-def collect_labels(b, reg):
-    """Vocabulary drift detector: new belt-status phrasings show up here first."""
-    info = b.get("info") or {}
-    for raw in (b.get("info_raw") or {}):
-        reg["bout_label"][raw] += 1
-    kind, _ = belt_status_kind(info.get("belt_status_before_fight"))
-    reg["belt_status_kind"][kind] += 1
-    if kind in ("vacant", "other") and info.get("belt_status_before_fight"):
-        reg["belt_status_value"][info["belt_status_before_fight"][:60]] += 1
+def collect_labels(ev, reg):
+    reg["production"].update(ev["production_raw"].keys())
+    reg["status"].update([ev.get("status") or "None"])
+    reg["sport_label"].update([ev.get("sport_label") or "None"])
+    for b in ev["bouts"]:
+        reg["comparison"].update(v["label"] for v in b["comparison"].values())
+        if b["sport"]:
+            reg["bout_sport"].update([b["sport"]])
+        if b["method"]:
+            reg["method"].update([b["method"].split(",")[0].strip()])
+        if b.get("title_kind"):
+            reg["title_kind"].update([b["title_kind"]])
 
-def flatten(b, row):
-    """Belt status + tournament placement. Gym / "Fighting out of" stay dropped."""
-    info = b.get("info") or {}
-    status_raw = info.get("belt_status_before_fight")
-    kind, holder = belt_status_kind(status_raw)
-    return {
-        "bout_slug": row["slug"],
-        "bout_id": b.get("bout_id") or row.get("bout_id"),
-        "bout_url": b.get("bout_url"),
-        "event_slug": (b.get("event") or {}).get("event_slug") or row.get("event_slug"),
-        "event_date": row.get("date"),
-        "event_status": row.get("status"),
-        "sport": row.get("sport"),
-        "title_bout_from_card": row.get("title_bout"),
-        "title_on_line": info.get("title_on_line"),
-        "belt_status_before_fight": status_raw,
-        "belt_status_kind": kind,
-        "belt_holder": holder,
-        # NOTE on kind == "absent": val() maps the literal "N/A" Tapology prints to
-        # None, so "absent" could in principle mean either "page said N/A" or "no
-        # such label". Measured 2026-08-25 over all 46,893 stage-3b rows: the label
-        # is present on every single one, and no_belt_status_label has never fired.
-        # So on this corpus "absent" ALWAYS means the page explicitly said N/A --
-        # i.e. no belt existed going in (inaugural title bout / tournament final).
-        # A separate label_present flag was tried and dropped: it was constant True.
-        # Tournament placement. Already produced by the extractor from the same
-        # label/value list as the belt fields -- previously discarded here.
-        "tournament": info.get("tournament"),
-        "tournament_round": info.get("tournament_round"),
-        "fighters": [f.get("fighter_slug") for f in (b.get("fighters") or [])],
-        "parse_ok": bool(b.get("parse_ok")),
-        "scraped_at": now(),
-    }
+PAGE_DATE_US = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")            # "Tuesday 10.01.2013"
+PAGE_DATE_LONG = re.compile(r"([A-Z][a-z]+) (\d{1,2}), (\d{4})")     # "October 1, 2013"
+
+def page_date(ev):
+    """The event page always states its own date. Sitemap-discovered events have no date
+    in the index, so recover it from the page rather than leaving the 9999 sentinel."""
+    dt = (ev.get("production") or {}).get("date_time") or ""
+    m = PAGE_DATE_US.search(dt)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(1)), int(m.group(2))).isoformat()
+        except ValueError:
+            pass
+    m = PAGE_DATE_LONG.search(ev.get("date_header") or "")
+    if m and m.group(1) in MON:
+        try:
+            return date(int(m.group(3)), MON[m.group(1)], int(m.group(2))).isoformat()
+        except ValueError:
+            pass
+    return None
+
+def flatten(ev, row):
+    """Split one parsed event into the three output tables."""
+    e = {k: v for k, v in ev.items() if k != "bouts"}
+    if row.get("date_precision") == "unknown":
+        pd_ = page_date(ev)
+        if pd_:
+            row = {**row, "date": pd_, "date_precision": "from_page"}
+    e.update({"event_slug": row["slug"], "event_id": row["event_id"],
+              "event_date_index": row["date"], "date_precision": row["date_precision"],
+              "index_promotion_id": row["promotion_id"], "scraped_at": now()})
+    bouts, links = [], []
+    for b in ev["bouts"]:
+        bouts.append({"event_slug": row["slug"], "event_id": row["event_id"], **b})
+        for f in b["fighters"]:
+            if f["fighter_slug"]:
+                links.append({"event_slug": row["slug"], "bout_id": b["bout_id"],
+                              "bout_slug": b["bout_slug"], "side": f["side"],
+                              "fighter_slug": f["fighter_slug"], "name": f["name"],
+                              "result": f["result"], "sport": b["sport"],
+                              "title_kind": b.get("title_kind")})
+    for c in ev.get("cancelled_bouts", []):
+        for f in c["fighters"]:
+            if f["fighter_slug"]:
+                links.append({"event_slug": row["slug"], "bout_id": c["bout_id"],
+                              "bout_slug": c["bout_slug"], "side": None,
+                              "fighter_slug": f["fighter_slug"], "name": f["name"],
+                              "result": c["status"], "sport": None, "title_kind": None})
+    return e, bouts, links
 
 def append_jsonl(path, records):
     if not records:
@@ -268,20 +279,13 @@ def main():
     ap.add_argument("--sleep", type=float, default=2.0,
                     help="baseline seconds between events; rises automatically on 503s")
     ap.add_argument("--newest-first", action="store_true")
-    ap.add_argument("--newest", type=int, default=0,
-                    help="take the N most recent title bouts")
-    ap.add_argument("--oldest", type=int, default=0,
-                    help="take the N oldest title bouts (combines with --newest)")
-    ap.add_argument("--completed-only", action="store_true",
-                    help="only bouts on events with status Completed")
-    ap.add_argument("--include-unindexed", action="store_true",
-                    help="crawl --worklist slugs that are absent from bouts.jsonl "
-                         "(cancelled bouts never appear on a card)")
-    ap.add_argument("--worklist", default=None,
-                    help="file of bout slugs (one per line) to restrict the queue to; "
-                         "produced by scrapers/derive/belts.py")
+    ap.add_argument("--after", default=None, help="only events on/after YYYY-MM-DD")
+    ap.add_argument("--before", default=None, help="only events before YYYY-MM-DD "
+                    "(default: tomorrow -- scheduled events have no results to scrape)")
     ap.add_argument("--rotate-every", type=int, default=600,
                     help="events per IP before a proactive rotation")
+    ap.add_argument("--include-future", action="store_true",
+                    help="also crawl events dated after today")
     args = ap.parse_args()
 
     for p in (HTMLDIR, STATE):
@@ -290,7 +294,7 @@ def main():
     # Single-instance guard. Two crawlers sharing the append-only outputs produce
     # duplicate rows and race on the archive temp file, so refuse to start if another
     # one is alive. (A stale pid from a hard kill is ignored.)
-    LOCK = STATE / "crawl_stage3b.lock"
+    LOCK = STATE / "crawl_stage3.lock"
     if LOCK.exists():
         try:
             other = int(LOCK.read_text().strip())
@@ -303,57 +307,43 @@ def main():
     import atexit
     atexit.register(lambda: LOCK.unlink(missing_ok=True))
 
-    work = build_worklist(args.newest_first, args.completed_only, any_kind=bool(args.worklist))
-    if args.worklist:
-        want = {l.strip() for l in open(args.worklist) if l.strip()}
-        before = len(work)
-        work = [r for r in work if r["slug"] in want]
-        log(f"  worklist filter: {before} -> {len(work)} bouts "
-            f"({len(want)} slugs requested, {len(want) - len(work)} not in the index)")
-        if args.include_unindexed:
-            # A CANCELLED bout never appears on the card, so it is not in bouts.jsonl and
-            # the index cannot supply a row for it. The slug is still a real page and it
-            # carries its own bout_id as the leading number, which is all the crawler
-            # needs. Date is unknown, so these sort to the end of the queue.
-            have = {r["slug"] for r in work}
-            added = 0
-            for slug in sorted(want - have):
-                m = re.match(r"^(\d+)-", slug)
-                work.append({"date": "9999-12-31", "status": None, "slug": slug,
-                             "bout_id": int(m.group(1)) if m else None,
-                             "event_slug": None, "sport": None, "title_bout": None})
-                added += 1
-            log(f"  --include-unindexed: added {added} slugs absent from bouts.jsonl")
+    work = build_worklist(args.newest_first)
     done = load_done()
     todo = [r for r in work if r["slug"] not in done]
-    # Pilot selection: the two ends of the date range, where page format is most likely
-    # to differ. Taken from the date-sorted worklist before any other filtering.
-    if args.newest or args.oldest:
-        by_date = sorted(todo, key=lambda r: (r["date"], r["bout_id"] or 0))
-        picked, seen = [], set()
-        for r in (by_date[-args.newest:] if args.newest else []):
-            if r["slug"] not in seen:
-                seen.add(r["slug"]); picked.append(r)
-        for r in (by_date[:args.oldest] if args.oldest else []):
-            if r["slug"] not in seen:
-                seen.add(r["slug"]); picked.append(r)
-        todo = sorted(picked, key=lambda r: (r["date"], r["bout_id"] or 0))
+    if args.after:
+        todo = [r for r in todo if r["date"] >= args.after]
+    # Scheduled events carry no results, so they are excluded by default: crawling them
+    # now just banks an empty card that nothing would ever refresh. The stage-5 daily job
+    # picks them up once they have actually happened.
+    cutoff = args.before
+    if cutoff is None and not args.include_future:
+        cutoff = (date.today() + timedelta(days=1)).isoformat()
+    if cutoff:
+        # sitemap-discovered events have no date at all; they carry the 9999 sentinel and
+        # must be kept (they sort last) rather than mistaken for scheduled future events
+        skipped = sum(1 for r in todo
+                      if r["date"] >= cutoff and r["date_precision"] != "unknown")
+        todo = [r for r in todo
+                if r["date"] < cutoff or r["date_precision"] == "unknown"]
+        if skipped:
+            log(f"  excluding {skipped} events dated on/after {cutoff} (not yet contested)")
     if args.limit:
         todo = todo[:args.limit]
-    log(f"START stage-3b: {len(work)} title bouts indexed, {len(done)} done, "
-        f"{len(todo)} queued this run")
+    log(f"START stage-3: {len(work)} events indexed, {len(done)} done, "
+        f"{len(todo)} queued this run (order={'newest' if args.newest_first else 'oldest'}-first)")
     if not todo:
         # completion flag: `remaining` never reaches 0 on its own because future-dated
         # events are deliberately never crawled, so the queue emptying is the real signal
-        (STATE / "stage3b.done").write_text(now())
-        log("STAGE 3B COMPLETE (queue exhausted)")
+        (STATE / "stage3.done").write_text(now())
+        log("STAGE 3 COMPLETE (queue exhausted)")
         return
     if todo:
         log(f"  first: {todo[0]['date']}  {todo[0]['slug']}")
         log(f"  last : {todo[-1]['date']}  {todo[-1]['slug']}")
 
     reg = {k: Counter() for k in
-           ("bout_label", "belt_status_kind", "belt_status_value")}
+           ("production", "comparison", "bout_sport", "method", "status",
+            "sport_label", "title_kind")}
     if LABELS.exists():
         try:
             for k, v in json.loads(LABELS.read_text()).items():
@@ -377,8 +367,6 @@ def main():
     # costs the same number of rotations as waiting for it, minus ~9 min of stall each.
     ROTATE_EVERY = args.rotate_every
     soft = {"slug": None, "tries": 0, "streak": 0, "ok_run": 0, "since_rotate": 0}
-    badpage = {"slug": None, "tries": 0}
-    BADPAGE_MAX = 3
     pace = {"s": args.sleep}          # adaptive: rises on soft failures, decays back
 
     with sync_playwright() as pw:
@@ -538,7 +526,7 @@ def main():
                 rotate_vpn("proactive")
                 soft["since_rotate"] = 0
             row = todo[i]
-            url = "https://www.tapology.com/fightcenter/bouts/" + row["slug"]
+            url = "https://www.tapology.com/fightcenter/events/" + row["slug"]
             try:
                 res = B["page"].evaluate(JS, url)
             except (TargetClosedError, PWError) as ex:
@@ -553,18 +541,9 @@ def main():
                 if st == "CHALLENGE":
                     rotate_vpn("blocked")
                     continue                      # retry SAME event
-                if st == "REDIRECT":              # dead slug: permanent, never retry
-                    counts["miss"] += 1
-                    append_jsonl(ANOM, [{"bout_slug": row["slug"], "code": "redirected",
-                                         "detail": str(res.get("to"))[:120]}])
-                    log(f"  MISS {row['slug'][:44]} -> redirected to {res.get('to')}")
-                    done.add(row["slug"]); done_buf.append(row["slug"])
-                    i += 1
-                    time.sleep(pace["s"])
-                    continue
                 if st in (404, 410):              # genuinely gone: skip for good
                     counts["miss"] += 1
-                    append_jsonl(ANOM, [{"bout_slug": row["slug"], "code": "fetch_failed",
+                    append_jsonl(ANOM, [{"slug": row["slug"], "code": "fetch_failed",
                                          "detail": str(st)}])
                     log(f"  MISS {row['slug']} status={st}")
                     i += 1
@@ -582,7 +561,7 @@ def main():
                 pace["s"] = min(pace["s"] * 1.15, 4.0)     # nudge only; the IP change is the fix
                 if soft["tries"] > 8:
                     counts["miss"] += 1
-                    append_jsonl(ANOM, [{"bout_slug": row["slug"],
+                    append_jsonl(ANOM, [{"slug": row["slug"],
                                          "code": "fetch_failed_after_retries",
                                          "detail": str(st)}])
                     log(f"  MISS (gave up after 8 tries) {row['slug']} status={st}")
@@ -601,25 +580,8 @@ def main():
                 continue                          # retry SAME event
 
             html = res["html"]
-            if "boutComparisonTable" not in html and "Bout Information" not in html:
-                # Bounded. An unbounded retry here spun 75 times on one dead slug,
-                # burning a VPN region per attempt, until the run was killed by hand.
-                if badpage.get("slug") != row["slug"]:
-                    badpage["slug"], badpage["tries"] = row["slug"], 0
-                badpage["tries"] += 1
-                if badpage["tries"] > BADPAGE_MAX:
-                    counts["miss"] += 1
-                    append_jsonl(ANOM, [{"bout_slug": row["slug"],
-                                         "code": "bad_page_persistent",
-                                         "detail": f"no bout markup after {BADPAGE_MAX} IPs"}])
-                    log(f"  MISS (bad page on {BADPAGE_MAX} IPs) {row['slug'][:44]}")
-                    badpage["slug"], badpage["tries"] = None, 0
-                    done.add(row["slug"]); done_buf.append(row["slug"])
-                    i += 1
-                    time.sleep(pace["s"])
-                    continue
-                log(f"  BAD PAGE (no bout markup) {row['slug'][:40]} "
-                    f"-> rotating, retry {badpage['tries']}/{BADPAGE_MAX}")
+            if "primaryDetailsContainer" not in html and "sectionFightCard" not in html:
+                log(f"  BAD PAGE (no event markup) {row['slug'][:40]} -> rotating, retry")
                 rotate_vpn("bad-page")
                 continue                      # retry SAME event, nothing written
             p = html_path(row["slug"])
@@ -630,13 +592,13 @@ def main():
             os.replace(tmp, p)
 
             try:
-                bp = parse_bout_page(html, url)
-                e_row = flatten(bp, row)
-                anoms = qa(bp, row)
-                collect_labels(bp, reg)
+                ev = parse_event(html, url)
+                e_row, b_rows, l_rows = flatten(ev, row)
+                anoms = qa(ev, row)
+                collect_labels(ev, reg)
             except Exception as ex:                # a parser bug must not stop the crawl;
                 counts["parse_err"] += 1           # the HTML is already safely on disk
-                append_jsonl(ANOM, [{"bout_slug": row["slug"], "code": "parser_exception",
+                append_jsonl(ANOM, [{"slug": row["slug"], "code": "parser_exception",
                                      "detail": f"{type(ex).__name__}: {ex}"}])
                 log(f"  PARSE ERROR {row['slug']}: {type(ex).__name__}: {ex}")
                 done.add(row["slug"]); done_buf.append(row["slug"])
@@ -645,10 +607,13 @@ def main():
                 continue
 
             append_jsonl(DETAILS, [e_row])
+            append_jsonl(BOUTS, b_rows)
+            append_jsonl(EFIGHT, l_rows)
             if anoms:
                 append_jsonl(ANOM, anoms)
                 counts["anom"] += len(anoms)
             counts["ok"] += 1
+            counts["bouts"] += len(b_rows)
             soft["streak"] = 0
             soft["ok_run"] = soft.get("ok_run", 0) + 1
             soft["since_rotate"] = soft.get("since_rotate", 0) + 1
@@ -667,18 +632,17 @@ def main():
                 eta = left / rate if rate else 0
                 done_pct = 100 * len(done) / len(work)
                 log(f"  {counts['ok']}/{len(todo)} this run | {len(done)}/{len(work)} total "
-                    f"({done_pct:.1f}%) | {counts['anom']} anom | "
-                    f"{rate:.1f} bouts/min | ETA {eta/60:.1f}h | at {row['date']} "
+                    f"({done_pct:.1f}%) | {counts['bouts']} bouts | {counts['anom']} anom | "
+                    f"{rate:.1f} ev/min | ETA {eta/60:.1f}h | at {row['date']} "
                     f"{row['slug'][:38]}")
             time.sleep(pace["s"])
 
         flush()
         el = time.time() - t0
-        log(f"  belt status: {dict(reg['belt_status_kind'])}")
-        log(f"STOP: {counts['ok']} bouts, {counts['anom']} anomalies, "
-            f"{counts['miss']} misses, {counts['parse_err']} parser errors "
-            f"in {el/60:.1f} min ({counts['ok']/(el/60):.1f} bouts/min). "
-            f"done={len(done)}/{len(work)}")
+        log(f"STOP: {counts['ok']} events, {counts['bouts']} bouts, "
+            f"{counts['anom']} anomalies, {counts['miss']} misses, "
+            f"{counts['parse_err']} parser errors in {el/60:.1f} min "
+            f"({counts['ok']/(el/60):.1f} ev/min). done={len(done)}/{len(work)}")
         close_browser()
 
 if __name__ == "__main__":

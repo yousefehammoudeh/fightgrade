@@ -3,7 +3,7 @@
 **Purpose:** attach a belt to a bout when the source names every other belt on the card but
 not that one.
 
-`data/overrides/title_belts.jsonl`, applied by `scrapers/derive/belts.py`. 55 rows.
+`data/overrides/title_belts.jsonl`, applied by `derive/belts.py`. 55 rows.
 
 Everything else in the belt pipeline is derived from what Tapology prints. This file is the
 one place where an outside source is allowed in, so it is kept small, sourced line by line,

@@ -16,12 +16,12 @@ in the block uses that class on an svg.
 UFC 189 is the worked example: Aldo vs McGregor scores 2 belts, the other five cancelled
 bouts on the card score 0.
 
-  python3 scrapers/derive/cancelled_bouts.py   ->  data/cancelled_title_bouts.jsonl
+  python3 derive/cancelled_bouts.py   ->  data/cancelled_title_bouts.jsonl
 """
 import gzip, json, re, sys, collections, hashlib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA, HTML = ROOT / "data", ROOT / "data" / "html"
 
 SECTION = "id='sectionCancelled'"

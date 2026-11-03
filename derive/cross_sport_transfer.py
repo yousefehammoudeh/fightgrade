@@ -15,7 +15,7 @@ the same circularity rule promotion strength works under. Two steps:
 Outputs
   data/cross_sport_transfer.json   c_s, qbar and kappa per ordered sport pair
 
-  python3 scrapers/derive/cross_sport_transfer.py [--validate]
+  python3 derive/cross_sport_transfer.py [--validate]
 """
 import argparse, bisect, collections, json, math, pickle, sys, datetime as dt
 from pathlib import Path

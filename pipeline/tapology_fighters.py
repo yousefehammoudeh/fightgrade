@@ -29,8 +29,7 @@ from pathlib import Path
 from . import tapology as tap
 from .lake import Lake, environment, new_run_id, raw_html_key, zone
 
-sys.path.insert(0, str(tap.ROOT / "scrapers" / "extract"))
-from tapology_extract import parse_fighter_page  # noqa: E402
+from .parsers.tapology import parse_fighter_page
 
 TABLE = "fighter_records"
 ENTITY = "fighter"

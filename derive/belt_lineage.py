@@ -15,12 +15,12 @@ Outputs
   data/belt_reigns.jsonl     one row per reign
   logs/lineage_audit.log     agreement rate and the disagreements
 
-  python3 scrapers/derive/belt_lineage.py
+  python3 derive/belt_lineage.py
 """
 import json, collections, sys, re, datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA, STATE = ROOT / "data", ROOT / "logs"
 
 

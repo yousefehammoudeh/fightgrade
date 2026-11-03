@@ -15,12 +15,12 @@ Decisions this encodes are argued in docs/fighter-graph-and-gender.md. In short:
                male seeding refused on combined-sex events (whose per-bout strings
                drop the "and Women's" half).
 
-  python3 scrapers/derive/fighter_population.py [--out PATH]
+  python3 derive/fighter_population.py [--out PATH]
 """
 import argparse, json, collections, re, sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 FEM = re.compile(r"\b(Women|Women's|Womens|Woman|Female|Feamale|Ladies)\b", re.I)
 MAL = re.compile(r"\b(Men's|Mens|Male)\b")

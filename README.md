@@ -19,18 +19,20 @@ Two products off one pipeline:
 
 | path | what |
 |---|---|
-| `DESIGN.md` | **the spec** — read before changing anything |
-| `docs/` | 19 design docs: the scrape method, field census, data fixes, the strength and rating models, belts and lineage. **Authoritative on how the data behaves.** |
-| `HANDOFF.md` · `HANDOFF.stage2.md` | crawl-era state and operational traps (cited by `pipeline/tapology.py` and `DESIGN.md`) |
-| `pipeline/` | the three crawlers (Tapology, UFC Stats, MMADecisions) → raw HTML in GCS → Parquet → LANDING |
-| `orchestration/` | Dagster+ definitions: crawls, the PROD build, DEV resync, `judge_lens_train` |
+| `pipeline/` | the crawlers (Tapology, UFC Stats, MMADecisions, Wikipedia, news) → raw HTML in GCS → Parquet → LANDING |
+| `pipeline/parsers/` | one HTML parser per source, pure functions of a page, so a fix replays over the archive |
+| `pipeline/tapology_archive/` | the stage-3 Tapology archive crawl and its replays (`reparse*.py`) |
 | `dbt/` | LANDING → CLEANSING → REFINED → PUBLISHED on Snowflake, with the data tests |
+| `orchestration/` | Dagster+ definitions: crawls, the PROD build, DEV resync, `judge_lens_train` |
 | `ml/judge_lens/` | the judge model: training, the Registry, panels, publishing (`DESIGN.md` §8) |
 | `apps/judge_lens/` | the Judge Lens page, Streamlit in Snowflake |
 | `terraform/` | GCS, Snowflake (DEV and PROD), roles and grants |
-| `scrapers/` | the extractors, the stage-3 crawlers and their archive replays (`driver/reparse*.py`), and the 8-script derive layer |
+| `derive/` | the 8-script derive layer (belts, lineage, title stakes, promotion strength); offline, not yet in Dagster |
 | `scripts/` | archive staging, and the promotion-strength tuning and validation |
 | `experiments/` | spikes with written-up results |
+| `DESIGN.md` | **the spec** — read before changing anything |
+| `docs/` | design docs: the scrape method, field census, data fixes, the strength and rating models, belts and lineage. **Authoritative on how the data behaves.** |
+| `docs/history/` | crawl-era handoffs and operational traps (cited by `pipeline/tapology.py` and `DESIGN.md`) |
 | `data/` | the datasets + the 8.8 GB raw HTML archive — **gitignored** |
 
 Legacy tools (the style analysis, the title-fight viewer, stage-2 crawlers, one-off fixes) stay on
@@ -64,8 +66,8 @@ orchestration/run_dagster.sh                               # Dagster UI on :3000
 `mmadecisions_crawl` with `replay: true`; for the stage-3 Tapology corpus:
 
 ```bash
-python3 scrapers/driver/reparse.py --commit      # events,  ~3.5 h, zero network
-python3 scrapers/driver/reparse3b.py --commit    # bouts,   ~140 s
+python3 -m pipeline.tapology_archive.reparse --commit      # events,  ~3.5 h, zero network
+python3 -m pipeline.tapology_archive.reparse3b --commit    # bouts,   ~140 s
 ```
 
 Crawling the corpus took 26 hours. Replaying it takes 3.5. That asymmetry is the whole reason the

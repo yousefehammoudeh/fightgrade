@@ -5,7 +5,7 @@
 `title_bout` is free text on the card, not a belt id. These are the rules for turning
 59,787 title-bout links into a belt registry, and the reason each rule exists.
 
-Derived by `scrapers/derive/belts.py` -> `data/belts.jsonl`, `data/bout_belts.jsonl`,
+Derived by `derive/belts.py` -> `data/belts.jsonl`, `data/bout_belts.jsonl`,
 `logs/belt_worklist.txt`. Seconds, no network.
 
 ## Belt key

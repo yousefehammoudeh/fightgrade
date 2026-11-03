@@ -16,12 +16,12 @@ Coverage is partial and worth knowing before relying on it: of the title bouts w
 cached page, ~43% carry a weigh-in and almost none carry a fight-day weight (it is close to
 UFC-only). Nothing is inferred where the row is absent.
 
-  python3 scrapers/derive/weigh_ins.py   ->  data/bout_weigh_ins.jsonl
+  python3 derive/weigh_ins.py   ->  data/bout_weigh_ins.jsonl
 """
 import collections, gzip, hashlib, json, re, sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 HTMLB = DATA / "html_bouts"
 
