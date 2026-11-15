@@ -39,6 +39,14 @@ RUNS = ROOT / "_crawlruns" / "ufcstats"
 BASE = "http://www.ufcstats.com"
 LISTING = f"{BASE}/statistics/events/completed"
 FIGHTER_LISTING = f"{BASE}/statistics/fighters?char={{}}&page=all"
+# UFC Stats serves plain http. Current Chrome (157 here; the Dagster+ image picks
+# up whatever stable is out when it is built) refuses an http page on a fresh
+# profile with net::ERR_BLOCKED_BY_CLIENT before a request leaves the browser:
+# that ended the 2026-11-08 run on its first page. These features are its
+# https-first and https-upgrade behaviour; with them off the page loads as before.
+ALLOW_HTTP = "--disable-features=" + ",".join((
+    "HttpsUpgrades", "HttpsFirstBalancedModeAutoEnable", "HttpsFirstModeV2ForTypicallySecureUsers",
+    "HttpsFirstModeV2ForEngagedSites", "HttpsFirstBalancedMode", "HttpsFirstModeIncognito"))
 
 from .parsers.ufcstats import (CHALLENGE_MARK, parse_event, parse_events_list, parse_fight,  # noqa: E402
                               parse_fighter, parse_fighters_list)
@@ -117,7 +125,7 @@ class Browser:
         it is also discovery's page 1."""
         self.display = virtual_display()
         self.profile = tempfile.mkdtemp(prefix="ufcstats_chrome_")
-        args = ["--disable-dev-shm-usage"] if sys.platform.startswith("linux") else []
+        args = [ALLOW_HTTP] + (["--disable-dev-shm-usage"] if sys.platform.startswith("linux") else [])
         self.ctx = self.pw.chromium.launch_persistent_context(
             user_data_dir=self.profile, channel="chrome", headless=False, args=args, env=dict(os.environ),
             viewport={"width": 1280, "height": 900}, locale="en-US")
